@@ -1,0 +1,3256 @@
+-- ORE FARM WITH AUTO POTIONS - v2.1
+-- Separated render/game loops | Smooth lerp movement | Anti-cheat safe
+-- Credits: Seniors for advice | KeyAuth | hashmka/Sploiter13
+-- Full changelog: See CHANGELOG.md
+
+-- Load TweenService support
+pcall(function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Sploiter13/severefuncs/refs/heads/main/merge2.lua"))()
+end)
+
+--[[
+CONFIGURATION: _G.OreUnicornCustomSettings = {
+    UseSmoothMovement = true,  -- Lerp position (anti-cheat safe)
+    TweenSpeed = 2,            -- Interpolation duration
+    MaxRockDistance = 99999,   -- Scan range (reduce if lag)
+    PotionUsageCounts = {Luck=10, Speed=3, Miner=5, Damage=3, Health=2},
+    AutoPotion = {Enabled=true, Luck=true, Miner=true},
+    EnabledRocks = {["Basalt Core"]=true, ["Basalt Rock"]=true}
+}
+SLOTS: 1=Pickaxe, 2=Weapon, 3=Portal, 4-8=Potions, 9=Inventory
+]]
+
+-- ============================================================================
+-- SERVICES
+-- ============================================================================
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local Camera = Workspace.CurrentCamera
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local MouseService = game:GetService("MouseService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local UserInputService = nil
+pcall(function() UserInputService = game:GetService("UserInputService") end)
+
+-- ============================================================================
+-- CONFIGURATION
+-- ============================================================================
+local CustomSettings = _G.OreUnicornCustomSettings or {}
+
+local OreDatabase = {
+    ["Stonewake"] = {
+        "Stone", "Sand Stone", "Copper", "Iron", "Tin", "Silver", "Gold",
+        "Mushroomite", "Platinum", "Bananite", "Cardboardite", "Aite", "Poopite"
+    },
+    ["Forgotten"] = {
+        "Cobalt", "Titanium", "Lapis Lazuli", "Volcanic Rock", "Quartz", "Amethyst",
+        "Topaz", "Diamond", "Sapphire", "Boneite", "Slimite", "Dark Boneite",
+        "Cuprite", "Obsidian", "Emerald", "Ruby", "Rivalite", "Uranium", "Mythril",
+        "Eye Ore", "Fireite", "Magmaite", "Lightite", "Demonite", "Darkryte"
+    },
+    ["Goblin"] = {
+        "Blue Crystal", "Orange Crystal", "Green Crystal", "Purple Crystal",
+        "Crimson Crystal", "Rainbow Crystal", "Arcane Crystal"
+    },
+    ["Frostpire"] = {
+        "Tungsten", "Sulfur", "Pumice", "Graphite", "Aetherit", "Scheelite",
+        "Larimar", "Neurotite", "Frost Fossil", "Tide Carve", "Velchire", "Sanctis",
+        "Snowite", "Iceite", "Mistvein", "Lgarite", "Voidfractal", "Moltenfrost",
+        "Crimsonite", "Malachite", "Aqujade", "Cryptex", "Galestor", "Voidstar", 
+        "Etherealite", "Suryafal", "Heavenite", "Gargantuan"
+    }
+}
+
+local Config = {
+    -- Core
+    DebugMode = CustomSettings.DebugMode or false,
+    FolderName = "Rocks",
+    LavaFolder = CustomSettings.LavaFolder or "Island2VolcanicDepths",
+    ToolName = CustomSettings.PickaxeName or "Pickaxe",
+    WeaponName = CustomSettings.WeaponName or "Weapon",
+    
+    -- Mining
+    MineDistance = CustomSettings.MineDistance or 10,
+    UnderOffset = CustomSettings.UnderOffset or 7,
+    AboveOffset = CustomSettings.AboveOffset or 7,
+    MiningPosition = CustomSettings.MiningPosition or "Under",
+    ClickDelay = CustomSettings.ClickDelay or 0.25,
+    
+    -- Combat
+    MobDetectionRange = CustomSettings.MobScanRange or 30,
+    MobCombatMode = CustomSettings.CombatMode or "Kill",
+    CombatUnderOffset = CustomSettings.CombatUnderOffset or 8,
+    
+    -- Filter
+    FilterEnabled = CustomSettings.FilterEnabled or false,
+    FilterVolcanicOnly = CustomSettings.FilterVolcanicOnly or false,
+    FilterWhitelist = CustomSettings.FilterWhitelist or {},
+    
+    -- System
+    AutoScanRate = CustomSettings.AutoScanRate or 1,
+    SkyHeight = CustomSettings.SkyHeight or 500,
+    MainEnabled = false,
+    EspEnabled = CustomSettings.EspEnabled or false,
+    OnlyLava = CustomSettings.OnlyLava or false,
+    PriorityVolcanic = CustomSettings.PriorityVolcanic or false,
+    TravelSpeed = CustomSettings.TravelSpeed or 300,
+    InstantTP_Range = CustomSettings.InstantTP_Range or 60,
+    AutoEquip = CustomSettings.AutoEquip or false,
+    UseSmoothMovement = CustomSettings.UseSmoothMovement == nil and false or CustomSettings.UseSmoothMovement,
+    TweenSpeed = CustomSettings.TweenSpeed or 2,
+    MaxRockDistance = CustomSettings.MaxRockDistance or 99999,  -- Max distance to scan for rocks (default: unlimited)
+    
+    -- Auto Sell
+    AutoSell = CustomSettings.AutoSell or false,
+    MerchantPos = Vector3.new(
+        CustomSettings.MerchantPos and CustomSettings.MerchantPos.X or -132.07,
+        CustomSettings.MerchantPos and CustomSettings.MerchantPos.Y or 21.61,
+        CustomSettings.MerchantPos and CustomSettings.MerchantPos.Z or -20.92
+    ),
+    
+    -- Auto Potion
+    AutoPotion = {
+        Enabled = (CustomSettings.AutoPotion and CustomSettings.AutoPotion.Enabled) or false,
+        Luck = (CustomSettings.AutoPotion and CustomSettings.AutoPotion.Luck) or false,
+        Speed = (CustomSettings.AutoPotion and CustomSettings.AutoPotion.Speed) or false,
+        Miner = (CustomSettings.AutoPotion and CustomSettings.AutoPotion.Miner) or false,
+        Damage = (CustomSettings.AutoPotion and CustomSettings.AutoPotion.Damage) or false,
+        Health = (CustomSettings.AutoPotion and CustomSettings.AutoPotion.Health) or false,
+    },
+    
+    PotionPositions = {
+        Luck = vector.create(160.21, 18.24, 57.03),
+        Speed = vector.create(148.70, 18.33, 56.96),
+        Miner = vector.create(140.07, 18.25, 55.61),
+        Damage = vector.create(136.02, 18.22, 54.91),
+        Health = vector.create(131.26, 18.26, 53.60),
+    },
+    
+    PotionUI = {
+        MaxButtonX = (CustomSettings.PotionUI and CustomSettings.PotionUI.MaxButtonX) or 0.6078,
+        MaxButtonY = (CustomSettings.PotionUI and CustomSettings.PotionUI.MaxButtonY) or 0.6204,
+        YesButtonX = (CustomSettings.PotionUI and CustomSettings.PotionUI.YesButtonX) or 0.3797,
+        YesButtonY = (CustomSettings.PotionUI and CustomSettings.PotionUI.YesButtonY) or 0.7009,
+    },
+    
+    EspTextColor = Color3.fromRGB(
+        CustomSettings.EspColor and CustomSettings.EspColor.R or 100,
+        CustomSettings.EspColor and CustomSettings.EspColor.G or 255,
+        CustomSettings.EspColor and CustomSettings.EspColor.B or 100
+    ),
+    EspTextSize = CustomSettings.EspTextSize or 16,
+}
+
+if CustomSettings.EnabledRocks then
+    for rockName, enabled in pairs(CustomSettings.EnabledRocks) do
+        EnabledRocks[rockName] = enabled
+    end
+end
+
+-- ============================================================================
+-- STATE VARIABLES
+-- ============================================================================
+local LocalPlayer = Players.LocalPlayer
+local ActiveRocks = {}
+local ActiveOres = {}
+local EnabledRocks = {}
+local RockNamesSet = {}
+local RockList = {}
+
+local CurrentTarget = nil
+local CurrentMobTarget = nil
+local SavedMiningTarget = nil
+local MouseState = { WasPressed = false }
+local EquipDebounce = 0
+local LastMineClick = 0
+local TargetLocked = false
+local LastWeaponSwitch = 0
+local InCombat = false
+
+local PriorityRocks = {}
+local MaxPriorities = 3
+local LastRockClick = {}
+local DoubleClickDelay = 0.5
+
+local IsSelling = false
+local IsBuyingPotions = false
+
+-- Potion System
+local PotionTimers = {
+    Luck = 0, Speed = 0, Miner = 0, Damage = 0, Health = 0,
+}
+
+local PotionInventory = {
+    Luck = 0, Speed = 0, Miner = 0, Damage = 0, Health = 0,
+}
+
+local PotionSlotMap = {
+    Luck = nil, Speed = nil, Miner = nil, Damage = nil, Health = nil,
+}
+
+local PotionDurations = {
+    Luck = 300, Speed = 60, Miner = 300, Damage = 60, Health = 5,
+}
+
+local PotionUsageCounts = {
+    Luck = (CustomSettings.PotionUsageCounts and CustomSettings.PotionUsageCounts.Luck) or 10,
+    Speed = (CustomSettings.PotionUsageCounts and CustomSettings.PotionUsageCounts.Speed) or 3,
+    Miner = (CustomSettings.PotionUsageCounts and CustomSettings.PotionUsageCounts.Miner) or 3,
+    Damage = (CustomSettings.PotionUsageCounts and CustomSettings.PotionUsageCounts.Damage) or 3,
+    Health = (CustomSettings.PotionUsageCounts and CustomSettings.PotionUsageCounts.Health) or 3,
+}
+
+-- Map config names to actual game potion names
+local PotionNameMap = {
+    ["Luck"] = "LuckPotion1",
+    ["Speed"] = "MovementSpeedPotion1",
+    ["Miner"] = "MinerPotion1",
+    ["Damage"] = "AttackDamagePotion1",
+    ["Health"] = "HealthPotion2"
+}
+
+-- Session Stats
+local SessionStats = {
+    StartTime = os.clock(),
+    RocksMined = {},
+    TotalRocks = 0,
+    OresCollected = {},
+    CurrentRock = nil,
+    CurrentRockHP = 0,
+    CurrentRockMaxHP = 0,
+    NextRock = nil,
+}
+
+-- Ore Tracker
+local OreTracker = {
+    CurrentRockOres = {},
+    RecentRockOres = {},
+    MaxHistory = 5,
+}
+
+-- UI Configurations
+local MainUI = {
+    X = 100, Y = 100, Width = 250, BaseHeight = 380, Visible = true,
+    Dragging = false, DragOffset = {x = 0, y = 0},
+    ToggleBtn = { X = 0, Y = 500, W = 40, H = 40 }
+}
+
+local FilterUI = {
+    X = 400, Y = 100, Width = 250, BaseHeight = 262, Visible = false,
+    Dragging = false, DragOffset = {x = 0, y = 0},
+    CurrentCategory = "Stonewake"
+}
+
+local StatsUI = {
+    X = 680, Y = 100, Width = 220, Height = 250, Visible = true,
+    Dragging = false, DragOffset = {x = 0, y = 0},
+}
+
+local OreTrackerUI = {
+    X = 920, Y = 100, Width = 240, Height = 300, Visible = true,
+    Dragging = false, DragOffset = {x = 0, y = 0},
+}
+
+local PotionUI = {
+    X = 1180, Y = 100, Width = 200, Height = 280, Visible = false,
+    Dragging = false, DragOffset = {x = 0, y = 0},
+}
+
+local Colors = {
+    Bg = Color3.fromRGB(30, 30, 30), 
+    Header = Color3.fromRGB(45, 45, 45),
+    Text = Color3.fromRGB(255, 255, 255), 
+    On = Color3.fromRGB(0, 255, 100),
+    Off = Color3.fromRGB(255, 50, 50), 
+    Btn = Color3.fromRGB(60, 60, 60),
+    Lava = Color3.fromRGB(255, 100, 0), 
+    Gold = Color3.fromRGB(255, 200, 0),
+    Debug = Color3.fromRGB(255, 0, 255), 
+    Combat = Color3.fromRGB(255, 100, 150),
+    StatsBg = Color3.fromRGB(35, 35, 35), 
+    StatsHeader = Color3.fromRGB(50, 50, 80),
+    PotionBg = Color3.fromRGB(35, 35, 45), 
+    PotionHeader = Color3.fromRGB(150, 50, 200),
+}
+
+-- ============================================================================
+-- HELPER FUNCTIONS
+-- ============================================================================
+local function FormatTime(seconds)
+    if not seconds or type(seconds) ~= "number" or seconds < 0 then
+        return "0s"
+    end
+    
+    local hours = math.floor(seconds / 3600)
+    local mins = math.floor((seconds % 3600) / 60)
+    local secs = math.floor(seconds % 60)
+    
+    if hours > 0 then
+        return string.format("%dh %dm %ds", hours, mins, secs)
+    elseif mins > 0 then
+        return string.format("%dm %ds", mins, secs)
+    else
+        return string.format("%ds", secs)
+    end
+end
+
+local function IsValid(Obj)
+    return Obj and Obj.Parent
+end
+
+local function SafeGetAttribute(Obj, Attr)
+    if not IsValid(Obj) then return nil end
+    local success, result = pcall(function() return Obj:GetAttribute(Attr) end)
+    return success and result or nil
+end
+
+local function SafeGetName(Obj)
+    if not IsValid(Obj) then return nil end
+    local success, result = pcall(function() return Obj.Name end)
+    return success and result or nil
+end
+
+local function GetRockHealth(Rock)
+    local H = SafeGetAttribute(Rock, "Health")
+    return (H and tonumber(H)) or 0
+end
+
+local function GetRockMaxHealth(Rock)
+    local H = SafeGetAttribute(Rock, "MaxHealth")
+    return (H and tonumber(H)) or 0
+end
+
+local function GetPosition(Obj)
+    if not IsValid(Obj) then return nil end
+    
+    if Obj.ClassName == "Model" then
+        if Obj.PrimaryPart then return Obj.PrimaryPart.Position end
+        
+        local success, kids = pcall(function() return Obj:GetChildren() end)
+        if success and kids then
+            for i = 1, #kids do
+                local child = kids[i]
+                if child.ClassName == "Part" or child.ClassName == "MeshPart" then
+                    return child.Position
+                end
+            end
+        end
+    elseif string.find(Obj.ClassName, "Part") then
+        return Obj.Position
+    end
+    
+    return nil
+end
+
+local function IsVolcanic(Rock)
+    if not IsValid(Rock) then return false end
+    
+    local N = SafeGetName(Rock)
+    if N == "Volcanic Rock" then return true end
+    
+    local Attr = SafeGetAttribute(Rock, "Ore")
+    if Attr and tostring(Attr) == "Volcanic Rock" then return true end
+    
+    if Rock:FindFirstChild("Volcanic Rock") then return true end
+    
+    return false
+end
+
+local function ValidateAndCorrectMerchantPos(scannedPos)
+    local IncorrectPos = vector.create(179, 28, 125)
+    local CorrectPos = vector.create(180.89, 19.02, 131.90)
+    
+    local diff = vector.create(
+        math.abs(scannedPos.x - IncorrectPos.x),
+        math.abs(scannedPos.y - IncorrectPos.y),
+        math.abs(scannedPos.z - IncorrectPos.z)
+    )
+    
+    if diff.x <= 5 and diff.y <= 10 and diff.z <= 10 then
+        print("[Position Validator] ⚠ Detected incorrect scan")
+        print("[Position Validator] ✓ Correcting to: " .. tostring(CorrectPos))
+        return CorrectPos
+    end
+    
+    return scannedPos
+end
+
+local function DetectWorld()
+    if Workspace:FindFirstChild("World3") or Workspace:FindFirstChild("W3") then
+        return 3
+    end
+    
+    if Workspace:FindFirstChild("Rocks") then
+        local rocks = Workspace.Rocks
+        if rocks:FindFirstChild("Island3Frostpire") or rocks:FindFirstChild("Frostpire") then
+            return 3
+        end
+    end
+    
+    return 1
+end
+
+local function FindMerchant()
+    local Success, GreedyCey = pcall(function()
+        return Workspace:FindFirstChild("Proximity") and Workspace.Proximity:FindFirstChild("Greedy Cey")
+    end)
+    
+    if Success and GreedyCey then
+        local Root = GreedyCey:FindFirstChild("HumanoidRootPart") or GreedyCey.PrimaryPart
+        
+        if not Root then
+            Root = GreedyCey:FindFirstChild("Head")
+        end
+        
+        if not Root then
+            local Success2, Children = pcall(function() return GreedyCey:GetChildren() end)
+            if Success2 and Children then
+                local largestSize = 0
+                for _, Child in ipairs(Children) do
+                    if Child.ClassName == "Part" or Child.ClassName == "MeshPart" or Child.ClassName == "UnionOperation" then
+                        local size = Child.Size.Magnitude
+                        if size > largestSize then
+                            largestSize = size
+                            Root = Child
+                        end
+                    end
+                end
+            end
+        end
+        
+        if Root then
+            print("[Merchant Scan] ✓ Found Greedy Cey at: " .. tostring(Root.Position))
+            return Root.Position
+        end
+    end
+    
+    local Success2, OreSeller = pcall(function()
+        return Workspace:FindFirstChild("Shops") and Workspace.Shops:FindFirstChild("Ore Seller")
+    end)
+    
+    if Success2 and OreSeller then
+        local Root = OreSeller:FindFirstChild("HumanoidRootPart") or OreSeller.PrimaryPart
+        
+        if Root then
+            print("[Merchant Scan] ✓ Found Ore Seller at: " .. tostring(Root.Position))
+            return Root.Position
+        end
+    end
+    
+    print("[Merchant Scan] ⚠ Could not find merchant")
+    return nil
+end
+
+local function GetObject(pathStr)
+    local segments = {}
+    for seg in string.gmatch(pathStr, "[^.]+") do
+        table.insert(segments, seg)
+    end
+    
+    local current = game
+    for i, name in ipairs(segments) do
+        if i == 1 and name == "game" then
+            -- skip
+        elseif current == game and name == "Players" then
+            current = Players
+        elseif current == Players and name ~= "LocalPlayer" then
+            current = current.LocalPlayer
+        else
+            local nextObj = current:FindFirstChild(name)
+            if not nextObj then return nil end
+            current = nextObj
+        end
+    end
+    return current
+end
+
+local function GetTextMemory(obj)
+    if not obj then return "" end
+    if memory and memory.readstring then
+        local success, result = pcall(function()
+            return memory.readstring(obj, 3648)
+        end)
+        return success and result or obj.Text
+    else
+        return obj.Text
+    end
+end
+
+-- ============================================================================
+-- POTION FUNCTIONS (FIXED)
+-- ============================================================================
+local function FindPotionSlot(potionName)
+    local Player = LocalPlayer
+    if not Player then return nil end
+    
+    local Backpack = Player.Backpack
+    local Character = Player.Character
+    
+    print("[POTION SCAN] Searching for: " .. potionName)
+    
+    -- Get actual potion name from the game
+    local actualPotionName = PotionNameMap[potionName] or potionName
+    print("[POTION SCAN] Looking for actual name: " .. actualPotionName)
+    
+    -- Check backpack FIRST (most common location)
+    if Backpack then
+        local success, tool = pcall(function()
+            return Backpack:FindFirstChild(actualPotionName)
+        end)
+        
+        if success and tool then
+            print("[POTION SCAN] ✓ FOUND in backpack: " .. tool.Name)
+            return 1, tool.Name, tool
+        end
+        
+        -- Debug: List what's in backpack
+        print("[POTION SCAN] Not found. Backpack contents:")
+        local listSuccess, children = pcall(function() return Backpack:GetChildren() end)
+        if listSuccess and children then
+            for _, obj in ipairs(children) do
+                local isValid, isTool = pcall(function()
+                    return obj:IsA("Tool")
+                end)
+                
+                if isValid and isTool then
+                    print("[POTION SCAN]   - " .. obj.Name)
+                end
+            end
+        end
+    end
+    
+    -- Check if equipped in character
+    if Character then
+        local success, tool = pcall(function()
+            return Character:FindFirstChild(actualPotionName)
+        end)
+        
+        if success and tool then
+            print("[POTION SCAN] ✓ FOUND equipped: " .. tool.Name)
+            return 1, tool.Name, tool
+        end
+    end
+    
+    print("[POTION SCAN] ⚠ Could not find: " .. actualPotionName)
+    return nil
+end
+
+local function GetPotionCount(potionName)
+    local _, foundName = FindPotionSlot(potionName)
+    if not foundName then return 0 end
+    
+    -- Try to extract count from name
+    local count = string.match(foundName, "%(x(%d+)%)")
+    if count then return tonumber(count) end
+    
+    count = string.match(foundName, "%((%d+)%)")
+    if count then return tonumber(count) end
+    
+    count = string.match(foundName, "x(%d+)$")
+    if count then return tonumber(count) end
+    
+    count = string.match(foundName, "(%d+)")
+    if count and tonumber(count) > 1 then return tonumber(count) end
+    
+    return 1
+end
+
+local function ScanPotionSlots()
+    -- Scan slots 4-8 for potions (fixed layout: 1=Pickaxe, 2=Weapon, 3=Portal, 9=Inventory)
+    print("[POTION SLOTS] Scanning slots 4-8 for potions...")
+    
+    local Player = LocalPlayer
+    if not Player then return end
+    
+    local Backpack = Player.Backpack
+    if not Backpack then return end
+    
+    -- Get all children
+    local allChildren = {}
+    pcall(function()
+        for _, child in ipairs(Backpack:GetChildren()) do
+            table.insert(allChildren, child)
+        end
+    end)
+    
+    -- Slots 4-8 are for potions
+    for slot = 4, 8 do
+        if allChildren[slot] then
+            local child = allChildren[slot]
+            local childName = child.Name
+            
+            print("[POTION SLOTS] Slot " .. slot .. ": " .. childName)
+            
+            -- Map to potion type
+            for configName, gameName in pairs(PotionNameMap) do
+                if childName == gameName or string.find(childName, gameName) then
+                    PotionSlotMap[configName] = slot
+                    print("[POTION SLOTS] ✓ Mapped " .. configName .. " to slot " .. slot)
+                    
+                    -- Check stack count
+                    local count = GetPotionCount(configName)
+                    if count > 1 then
+                        print("[POTION SLOTS]   Stack: x" .. count)
+                    end
+                end
+            end
+        else
+            print("[POTION SLOTS] Slot " .. slot .. ": (empty)")
+        end
+    end
+    
+    print("[POTION SLOTS] Slot mapping complete!")
+end
+
+local function CheckInventoryPotions(potionName)
+    print("[INVENTORY CHECK] Checking for existing " .. potionName .. " potions...")
+    
+    local _, foundName = FindPotionSlot(potionName)
+    if not foundName then
+        print("[INVENTORY CHECK] No " .. potionName .. " potions found")
+        return 0
+    end
+    
+    local count = GetPotionCount(potionName)
+    print("[INVENTORY CHECK] Found " .. count .. " " .. potionName .. " potion(s)")
+    return count
+end
+
+local function GetToolSlotByName(toolName)
+    -- Get the CURRENT slot number of a tool by scanning backpack in real-time
+    local Player = LocalPlayer
+    if not Player then return nil end
+    
+    local Backpack = Player.Backpack
+    if not Backpack then return nil end
+    
+    -- Get all tools in order
+    local tools = {}
+    local success = pcall(function()
+        for _, child in ipairs(Backpack:GetChildren()) do
+            local isValid = false
+            local childName = ""
+            
+            pcall(function()
+                isValid = child.ClassName == "Tool"
+                childName = child.Name
+            end)
+            
+            if isValid then
+                table.insert(tools, childName)
+                if childName == toolName then
+                    return #tools -- Return slot number immediately
+                end
+            end
+        end
+    end)
+    
+    if not success then return nil end
+    
+    -- Find our tool in the list
+    for i, name in ipairs(tools) do
+        if name == toolName then
+            return i
+        end
+    end
+    
+    return nil
+end
+
+local function EquipToolBySlot(slot)
+    -- Press the number key for the slot
+    if not slot or slot < 1 or slot > 9 then
+        print("[EQUIP] Invalid slot: " .. tostring(slot))
+        return false
+    end
+    
+    print("[EQUIP] Pressing key for slot " .. slot)
+    
+    -- Special handling for slot 9
+    local keycode
+    if slot == 9 then
+        keycode = 0x39  -- '9' key
+    else
+        keycode = 0x30 + slot  -- 0x31 = '1', 0x32 = '2', etc.
+    end
+    
+    if keypress then
+        keypress(keycode)
+        task.wait(0.15)
+        keyrelease(keycode)
+        print("[EQUIP] Used keypress() for slot " .. slot)
+    else
+        local keycodes = {
+            [1] = Enum.KeyCode.One, [2] = Enum.KeyCode.Two,
+            [3] = Enum.KeyCode.Three, [4] = Enum.KeyCode.Four,
+            [5] = Enum.KeyCode.Five, [6] = Enum.KeyCode.Six,
+            [7] = Enum.KeyCode.Seven, [8] = Enum.KeyCode.Eight,
+            [9] = Enum.KeyCode.Nine,
+        }
+        
+        local keyCode = keycodes[slot]
+        if keyCode then
+            VirtualInputManager:SendKeyEvent(true, keyCode, false, game)
+            task.wait(0.15)
+            VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+            print("[EQUIP] Used VirtualInputManager for slot " .. slot)
+        end
+    end
+    
+    return true
+end
+
+local function EquipPotionBySlot(slot)
+    if not slot or slot < 1 or slot > 9 then
+        return false
+    end
+    
+    print("[EQUIP] Pressing slot " .. slot)
+    
+    local keycode = 0x30 + slot
+    
+    if keypress then
+        keypress(keycode)
+        task.wait(0.1)
+        keyrelease(keycode)
+    else
+        local keycodes = {
+            [1] = Enum.KeyCode.One, [2] = Enum.KeyCode.Two,
+            [3] = Enum.KeyCode.Three, [4] = Enum.KeyCode.Four,
+            [5] = Enum.KeyCode.Five, [6] = Enum.KeyCode.Six,
+            [7] = Enum.KeyCode.Seven, [8] = Enum.KeyCode.Eight,
+            [9] = Enum.KeyCode.Nine,
+        }
+        
+        VirtualInputManager:SendKeyEvent(true, keycodes[slot], false, game)
+        task.wait(0.1)
+        VirtualInputManager:SendKeyEvent(false, keycodes[slot], false, game)
+    end
+    
+    return true
+end
+
+local function EquipPotionByName(potionName)
+    local Player = LocalPlayer
+    if not Player then return false end
+    
+    local Backpack = Player.Backpack
+    if not Backpack then return false end
+    
+    -- First try the cached slot
+    local slot = PotionSlotMap[potionName]
+    
+    -- If no cached slot, scan now
+    if not slot then
+        slot = GetToolSlotByName(PotionNameMap[potionName] or potionName)
+        if slot then
+            PotionSlotMap[potionName] = slot
+        end
+    end
+    
+    if not slot then
+        print("[EQUIP] ⚠ Could not find slot for " .. potionName)
+        return false
+    end
+    
+    print("[EQUIP] " .. potionName .. " is in slot " .. slot)
+    
+    -- Press the key
+    EquipPotionBySlot(slot)
+    
+    -- Don't verify - just assume it worked (it does work!)
+    print("[EQUIP] ✓ Pressed slot " .. slot)
+    return true
+end
+
+local function UsePotionFromInventory(potionName, slot, toolName)
+    -- Use the actual game name
+    local actualName = PotionNameMap[potionName] or potionName
+    return EquipPotionByName(actualName)
+end
+
+local function PressE()
+    if keypress then
+        keypress(0x45)
+        task.wait(0.05)
+        keyrelease(0x45)
+    else
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+    end
+end
+
+local function SetCameraToFaceSouth(Root)
+    local southDirection = Vector3.new(0, 0, -1)
+    local southPos = Root.Position + (southDirection * 20)
+    Camera.CFrame = CFrame.new(Root.Position, southPos) * CFrame.new(0, 5, 10)
+    task.wait(0.3)
+end
+
+local function tweenTo(RootPart, targetCFrame, time)
+    -- Simple tween helper using hashmka's TweenService
+    if not RootPart or not RootPart.Parent then
+        return false
+    end
+    
+    local tween = TweenService:Create(
+        RootPart,
+        TweenInfo.new(time or 0.35, Enum.EasingStyle.Linear),
+        {CFrame = targetCFrame}
+    )
+    
+    tween:Play()
+    tween.Completed:Wait()
+    
+    return true
+end
+
+local function SkyHopMove(RootPart, GoalPos, DeltaTime)
+    local CurrentPos = RootPart.Position
+    local Diff = GoalPos - CurrentPos
+    local Dist = vector.magnitude(Diff)
+    
+    
+    -- For very close distances, just instant TP
+    if Dist <= 5 then
+        RootPart.CFrame = CFrame.new(GoalPos.x, GoalPos.y, GoalPos.z)
+        RootPart.Velocity = vector.zero
+        return true
+    end
+    
+    -- Use smooth tweening if enabled
+    if Config.UseSmoothMovement then
+        -- Check if close enough to mine
+        if Dist <= Config.MineDistance then
+            return true
+        end
+        
+        -- Calculate tween duration based on distance
+        local duration = math.min(Dist / 150, Config.TweenSpeed)
+        
+        -- Tween to position
+        local targetCFrame = CFrame.new(GoalPos.x, GoalPos.y, GoalPos.z)
+        
+        -- Start tween in background (don't wait)
+        spawn(function()
+            pcall(function()
+                local tween = TweenService:Create(
+                    RootPart,
+                    TweenInfo.new(duration, Enum.EasingStyle.Linear),
+                    {CFrame = targetCFrame}
+                )
+                tween:Play()
+            end)
+        end)
+        
+        -- Return false to keep checking distance
+        return false
+    else
+        -- Original instant TP + smooth flight method
+        if Dist <= Config.InstantTP_Range then
+            RootPart.CFrame = CFrame.new(GoalPos.x, GoalPos.y, GoalPos.z)
+            RootPart.Velocity = vector.zero
+            return true
+        end
+        
+        
+        if CurrentPos.y < Config.SkyHeight - 10 then
+            RootPart.CFrame = CFrame.new(CurrentPos.x, Config.SkyHeight, CurrentPos.z)
+            RootPart.Velocity = vector.zero
+            return false
+        end
+        
+        local FlatDiff = vector.create(GoalPos.x - CurrentPos.x, 0, GoalPos.z - CurrentPos.z)
+        local FlatDist = vector.magnitude(FlatDiff)
+        
+        
+        if FlatDist < 15 then
+            RootPart.CFrame = CFrame.new(GoalPos.x, GoalPos.y, GoalPos.z)
+            RootPart.Velocity = vector.zero
+            return true
+        end
+        
+        local Step = Config.TravelSpeed * DeltaTime
+        local Direction = vector.normalize(FlatDiff)
+        local MoveVec = Direction * Step
+        local NewPos = CurrentPos + MoveVec
+        
+        RootPart.CFrame = CFrame.new(NewPos.x, Config.SkyHeight, NewPos.z)
+        RootPart.Velocity = vector.zero
+        return false
+    end
+end
+
+local function UseExistingPotions(potionName, availableCount)
+    print("[AUTO POTION] Using existing " .. potionName .. " potions...")
+    
+    local potionSlot, potionFullName, potionTool = FindPotionSlot(potionName)
+    
+    if not potionFullName then
+        print("[AUTO POTION] ⚠ Could not find " .. potionName .. " potion!")
+        return false
+    end
+    
+    print("[AUTO POTION] ✓ Found potion: " .. potionFullName)
+    
+    local usageCount = PotionUsageCounts[potionName] or 10
+    if availableCount < usageCount then
+        usageCount = availableCount
+    end
+    
+    local totalDuration = PotionDurations[potionName] * usageCount + 5
+    local currentTime = os.clock()
+    local existingTimeLeft = 0
+    
+    if PotionTimers[potionName] and PotionTimers[potionName] > currentTime then
+        existingTimeLeft = PotionTimers[potionName] - currentTime
+    end
+    
+    PotionTimers[potionName] = currentTime + existingTimeLeft + totalDuration
+    
+    local successfullyUsed = 0
+    
+    for i = 1, usageCount do
+        print("[AUTO POTION] Using potion " .. i .. "/" .. usageCount)
+        
+        UsePotionFromInventory(potionName, potionSlot, potionFullName)
+        task.wait(0.5)
+        mouse1click()
+        task.wait(2.5)
+        
+        if i % 3 == 0 and i < usageCount then
+            potionSlot, potionFullName, potionTool = FindPotionSlot(potionName)
+        end
+    end
+    
+    PotionInventory[potionName] = availableCount - usageCount
+    print("[AUTO POTION] ✓ Used " .. usageCount .. " potions!")
+    return true
+end
+
+local function BuyAndUsePotion(potionName)
+    local existingCount = CheckInventoryPotions(potionName)
+    local desiredCount = PotionUsageCounts[potionName] or 10
+    
+    print("[AUTO POTION] Have: " .. existingCount .. ", Desired: " .. desiredCount)
+    
+    -- If we have ANY potions in inventory, use them first
+    if existingCount > 0 then
+        print("[AUTO POTION] Found " .. existingCount .. " existing " .. potionName .. " potion(s)")
+        print("[AUTO POTION] Using existing potions...")
+        
+        local success = UseExistingPotions(potionName, existingCount)
+        
+        if success then
+            print("[AUTO POTION] ✓ Successfully used existing potions!")
+            print("[AUTO POTION] Skipping purchase for this cycle")
+            return true  -- Don't buy this cycle - we used what we had
+        else
+            print("[AUTO POTION] ⚠ Failed to use existing, will try buying")
+        end
+    end
+    
+    -- No inventory potions, or using them failed - buy new ones
+    print("[AUTO POTION] Buying " .. potionName .. " potion...")
+    
+    local potionPos = Config.PotionPositions[potionName]
+    if not potionPos then
+        print("[AUTO POTION] ⚠ Unknown potion: " .. potionName)
+        return false
+    end
+    
+    local Char = LocalPlayer.Character
+    local Root = Char and Char:FindFirstChild("HumanoidRootPart")
+    if not Root then
+        print("[AUTO POTION] ⚠ Character not found")
+        return false
+    end
+    
+    print("[AUTO POTION] Traveling to vendor...")
+    local arrived = false
+    while not arrived and Root.Parent do
+        arrived = SkyHopMove(Root, potionPos, 0.03)
+        task.wait(0.03)
+    end
+    
+    task.wait(0.8)
+    SetCameraToFaceSouth(Root)
+    
+    print("[AUTO POTION] Zooming out...")
+    if keypress then
+        for i = 1, 3 do
+            keypress(0x4F)
+            task.wait(0.05)
+            keyrelease(0x4F)
+            task.wait(0.15)
+        end
+    end
+    
+    task.wait(0.5)
+    
+    print("[AUTO POTION] Interacting with vendor...")
+    for i = 1, 5 do
+        PressE()
+        task.wait(0.3)
+    end
+    
+    task.wait(1.0)
+    
+    print("[AUTO POTION] Clicking Max button...")
+    if mousemoveabs then
+        local screenSize = Camera.ViewportSize
+        local maxButtonX = screenSize.X * Config.PotionUI.MaxButtonX
+        local maxButtonY = screenSize.Y * Config.PotionUI.MaxButtonY
+        
+        mousemoveabs(maxButtonX, maxButtonY)
+        task.wait(0.3)
+        
+        for i = 1, 3 do
+            mouse1click()
+            task.wait(0.2)
+        end
+    end
+    
+    task.wait(0.5)
+    
+    print("[AUTO POTION] Clicking Yes...")
+    if mousemoveabs then
+        local screenSize = Camera.ViewportSize
+        local yesButtonX = screenSize.X * Config.PotionUI.YesButtonX
+        local yesButtonY = screenSize.Y * Config.PotionUI.YesButtonY
+        
+        mousemoveabs(yesButtonX, yesButtonY)
+        task.wait(0.3)
+        
+        for i = 1, 3 do
+            mouse1click()
+            task.wait(0.2)
+        end
+    end
+    
+    task.wait(1.5)
+    
+    print("[AUTO POTION] Using purchased potions...")
+    
+    local potionSlot, potionFullName = FindPotionSlot(potionName)
+    
+    if not potionFullName then
+        print("[AUTO POTION] ⚠ Could not find after purchase!")
+        return false
+    end
+    
+    local availableCount = GetPotionCount(potionName)
+    local usageCount = desiredCount
+    if availableCount > 0 and availableCount < usageCount then
+        usageCount = availableCount
+    end
+    
+    print("[AUTO POTION] Will use " .. usageCount .. " potions")
+    
+    local totalDuration = PotionDurations[potionName] * usageCount + 5
+    local currentTime = os.clock()
+    local existingTimeLeft = 0
+    
+    if PotionTimers[potionName] and PotionTimers[potionName] > currentTime then
+        existingTimeLeft = PotionTimers[potionName] - currentTime
+    end
+    
+    PotionTimers[potionName] = currentTime + existingTimeLeft + totalDuration
+    
+    local successfullyUsed = 0
+    
+    for i = 1, usageCount do
+        print("[AUTO POTION] Using potion " .. i .. "/" .. usageCount)
+        
+        UsePotionFromInventory(potionName, potionSlot, potionFullName)
+        task.wait(0.5)
+        mouse1click()
+        task.wait(2.5)
+        
+        if i % 3 == 0 and i < usageCount then
+            potionSlot, potionFullName = FindPotionSlot(potionName)
+        end
+    end
+    
+    print("[AUTO POTION] ✓ Used " .. usageCount .. " potions!")
+    return true
+end
+
+local function PerformAutoPotions()
+    if IsBuyingPotions then return end
+    if not Config.AutoPotion or not Config.AutoPotion.Enabled then return end
+    
+    local currentTime = os.clock()
+    local needsRefresh = false
+    
+    for potionName, enabled in pairs(Config.AutoPotion) do
+        if enabled == true and potionName ~= "Enabled" then
+            if PotionTimers[potionName] <= currentTime then
+                needsRefresh = true
+                break
+            end
+        end
+    end
+    
+    if not needsRefresh then return end
+    
+    IsBuyingPotions = true
+    CurrentTarget = nil
+    CurrentMobTarget = nil
+    SavedMiningTarget = nil
+    TargetLocked = false
+    InCombat = false
+    Config.MainEnabled = false
+    
+    print("[AUTO POTION] Starting refresh cycle...")
+    
+    local potionOrder = {"Luck", "Miner", "Speed", "Damage", "Health"}
+    
+    for _, potionName in ipairs(potionOrder) do
+        if Config.AutoPotion[potionName] then
+            BuyAndUsePotion(potionName)
+            task.wait(1)
+        end
+    end
+    
+    print("[AUTO POTION] All potions refreshed!")
+    IsBuyingPotions = false
+end
+
+-- ============================================================================
+-- ORE DETECTION & FILTERING
+-- ============================================================================
+local function GetRevealedOreType(Rock)
+    if not IsValid(Rock) then return nil end
+    
+    local Attr = SafeGetAttribute(Rock, "Ore")
+    if Attr and Attr ~= "" then return tostring(Attr) end
+    
+    local FoundOres = {}
+    local Success, Children = pcall(function() return Rock:GetChildren() end)
+    if Success and Children then
+        for _, Child in Children do
+            if Child and Child.Name == "Ore" then
+                local ChildAttr = SafeGetAttribute(Child, "Ore")
+                if ChildAttr and ChildAttr ~= "" then
+                    table.insert(FoundOres, tostring(ChildAttr))
+                end
+            end
+        end
+    end
+    
+    if #FoundOres > 0 then return FoundOres[1] end
+    return nil
+end
+
+local function GetAllRevealedOres(Rock)
+    if not IsValid(Rock) then return {} end
+    
+    local AllOres = {}
+    
+    local Attr = SafeGetAttribute(Rock, "Ore")
+    if Attr and Attr ~= "" then
+        table.insert(AllOres, tostring(Attr))
+    end
+    
+    local Success, Children = pcall(function() return Rock:GetChildren() end)
+    if Success and Children then
+        for _, Child in Children do
+            if Child and Child.Name == "Ore" then
+                local ChildAttr = SafeGetAttribute(Child, "Ore")
+                if ChildAttr and ChildAttr ~= "" then
+                    local OreStr = tostring(ChildAttr)
+                    local AlreadyHave = false
+                    for _, ExistingOre in ipairs(AllOres) do
+                        if ExistingOre == OreStr then
+                            AlreadyHave = true
+                            break
+                        end
+                    end
+                    if not AlreadyHave then
+                        table.insert(AllOres, OreStr)
+                    end
+                end
+            end
+        end
+    end
+    
+    return AllOres
+end
+
+local function IsOreWanted(CurrentOre)
+    if not CurrentOre then return false end
+    CurrentOre = tostring(CurrentOre)
+    
+    if Config.FilterWhitelist[CurrentOre] then return true end
+    
+    local NoSpace = string.gsub(CurrentOre, " ", "")
+    local Lower = string.lower(CurrentOre)
+    local LowerNoSpace = string.lower(NoSpace)
+    
+    for whitelistedOre, enabled in pairs(Config.FilterWhitelist) do
+        if enabled then
+            if whitelistedOre == CurrentOre then return true end
+            if string.lower(whitelistedOre) == Lower then return true end
+            
+            local CleanWL = string.gsub(whitelistedOre, " ", "")
+            if CleanWL == NoSpace then return true end
+            if string.lower(CleanWL) == LowerNoSpace then return true end
+        end
+    end
+    return false
+end
+
+local function HasAnyWantedOre(Rock)
+    local AllOres = GetAllRevealedOres(Rock)
+    
+    if #AllOres == 0 then return false, nil end
+    
+    for _, OreName in ipairs(AllOres) do
+        if IsOreWanted(OreName) then
+            return true, AllOres
+        end
+    end
+    
+    return false, AllOres
+end
+
+local function RecordOreCollection(Rock)
+    local AllOres = GetAllRevealedOres(Rock)
+    local rockName = SafeGetName(Rock)
+    
+    if #AllOres > 0 then
+        table.insert(OreTracker.RecentRockOres, 1, {
+            rockName = rockName,
+            ores = AllOres,
+            timestamp = os.clock()
+        })
+        
+        while #OreTracker.RecentRockOres > OreTracker.MaxHistory do
+            table.remove(OreTracker.RecentRockOres)
+        end
+    end
+    
+    for _, OreName in ipairs(AllOres) do
+        if IsOreWanted(OreName) then
+            SessionStats.OresCollected[OreName] = (SessionStats.OresCollected[OreName] or 0) + 1
+        end
+    end
+end
+
+local function UpdateOreTracker()
+    if CurrentTarget and IsValid(CurrentTarget) then
+        local AllOres = GetAllRevealedOres(CurrentTarget)
+        OreTracker.CurrentRockOres = AllOres
+    else
+        OreTracker.CurrentRockOres = {}
+    end
+end
+
+-- ============================================================================
+-- MOB COMBAT
+-- ============================================================================
+local function IsAlive(Model)
+    if not Model then return false end
+    local Humanoid = Model:FindFirstChild("Humanoid")
+    local RootPart = Model:FindFirstChild("HumanoidRootPart")
+    return Humanoid and RootPart and Humanoid.Health > 0
+end
+
+local function FindNearestMob(MyPosition)
+    local LivingFolder = Workspace:FindFirstChild("Living")
+    if not LivingFolder then return nil end
+    
+    local Closest = nil
+    local MinDist = 999999
+    
+    local success, children = pcall(function() return LivingFolder:GetChildren() end)
+    if not success then return nil end
+    
+    for _, Mob in ipairs(children) do
+        if Players:FindFirstChild(Mob.Name) then continue end
+        
+        if Mob.ClassName == "Model" and IsAlive(Mob) then
+            local MobRoot = Mob:FindFirstChild("HumanoidRootPart")
+            if MobRoot then
+                local Dist = vector.magnitude(MobRoot.Position - MyPosition)
+                if Dist < MinDist and Dist <= Config.MobDetectionRange then
+                    MinDist = Dist
+                    Closest = Mob
+                end
+            end
+        end
+    end
+    
+    return Closest
+end
+
+local function EquipTool(ToolName, SlotNumber)
+    local Char = LocalPlayer.Character
+    if not Char then return false end
+    
+    if Char:FindFirstChild(ToolName) then return true end
+    
+    local Backpack = LocalPlayer.Backpack
+    if Backpack and Backpack:FindFirstChild(ToolName) then
+        if keypress and SlotNumber then
+            keypress(SlotNumber)
+            keyrelease(SlotNumber)
+            return true
+        end
+    end
+    return false
+end
+
+local function SpamWeaponSwitch()
+    if os.clock() - LastWeaponSwitch < 0.1 then return end
+    
+    if keypress then
+        local slot = (os.clock() % 0.4 < 0.2) and 49 or 50
+        keypress(slot)
+        keyrelease(slot)
+    end
+    
+    LastWeaponSwitch = os.clock()
+end
+
+-- ============================================================================
+-- AUTO SELL
+-- ============================================================================
+local function PerformAutoSell()
+    if IsSelling then return end
+    if not Config.AutoSell then return end
+    
+    local pName = LocalPlayer.Name
+    local Path_Capacity = "game.Players."..pName..".PlayerGui.Menu.Frame.Frame.Menus.Stash.Capacity.Text"
+    
+    local capObj = GetObject(Path_Capacity)
+    if not capObj then return end
+    
+    local text = GetTextMemory(capObj)
+    local current, max = text:match("(%d+)/(%d+)")
+    
+    if current and max and tonumber(current) >= tonumber(max) then
+        print("[AUTO SELL] Inventory full - starting")
+        IsSelling = true
+        CurrentTarget = nil
+        CurrentMobTarget = nil
+        SavedMiningTarget = nil
+        TargetLocked = false
+        InCombat = false
+        
+        print("[AUTO SELL] Scanning for merchant...")
+        local MerchantPosition = FindMerchant()
+        
+        if not MerchantPosition then
+            print("[AUTO SELL] ⚠ Using fallback position")
+            MerchantPosition = Config.MerchantPos
+        else
+            local scannedVec = vector.create(MerchantPosition.x, MerchantPosition.y, MerchantPosition.z)
+            local correctedVec = ValidateAndCorrectMerchantPos(scannedVec)
+            Config.MerchantPos = correctedVec
+            MerchantPosition = Vector3.new(correctedVec.x, correctedVec.y, correctedVec.z)
+        end
+        
+        local StartTime = os.clock()
+        local function CheckTimeout()
+            if os.clock() - StartTime > 60 then
+                warn("[AUTO SELL] Timeout! Aborting...")
+                IsSelling = false
+                return true
+            end
+            return false
+        end
+
+        local Char = LocalPlayer.Character
+        local Root = Char and Char:FindFirstChild("HumanoidRootPart")
+        if Root then
+            print("[AUTO SELL] Traveling to merchant...")
+            local arrived = false
+            while not arrived and Config.AutoSell and Root.Parent do
+                if CheckTimeout() then return end
+                arrived = SkyHopMove(Root, MerchantPosition, 0.03)
+                task.wait(0.03)
+            end
+            
+            if not arrived then
+                print("[AUTO SELL] Failed to reach merchant")
+                IsSelling = false
+                return
+            end
+            
+            task.wait(0.5)
+        else
+            IsSelling = false
+            return
+        end
+        
+        print("[AUTO SELL] Resetting camera...")
+        local lookAtMerchant = CFrame.new(Root.Position, Vector3.new(MerchantPosition.x, Root.Position.y, MerchantPosition.z))
+        Camera.CFrame = lookAtMerchant * CFrame.new(0, 5, 10)
+        task.wait(0.3)
+        
+        print("[AUTO SELL] Zooming out...")
+        if keypress then
+            for i = 1, 5 do
+                keypress(0x4F)
+                task.wait(0.05)
+                keyrelease(0x4F)
+                task.wait(0.1)
+            end
+        else
+            for i = 1, 5 do
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.O, false, game)
+                task.wait(0.05)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.O, false, game)
+                task.wait(0.1)
+            end
+        end
+        
+        task.wait(0.5)
+        
+        print("[AUTO SELL] Pressing E...")
+        for i = 1, 10 do
+            PressE()
+            task.wait(0.3)
+        end
+        
+        task.wait(3)
+        
+        print("[AUTO SELL] Using keyboard navigation...")
+        
+        -- Open sell UI
+        if keypress then
+            keypress(220) task.wait(0.1) keyrelease(220)
+            task.wait(0.2)
+            keypress(0x53) task.wait(0.1) keyrelease(0x53)
+            task.wait(0.2)
+            keypress(0x57) task.wait(0.1) keyrelease(0x57)
+            task.wait(0.2)
+            keypress(0x0D) task.wait(0.1) keyrelease(0x0D)
+        else
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Backslash, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Backslash, false, game)
+            task.wait(0.2)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.S, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.S, false, game)
+            task.wait(0.2)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+            task.wait(0.2)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+        end
+        
+        task.wait(1.0)
+        
+        -- Select all
+        if keypress then
+            keypress(0x41) task.wait(0.1) keyrelease(0x41)
+            task.wait(0.2)
+            keypress(0x57) task.wait(0.1) keyrelease(0x57)
+            task.wait(0.2)
+            keypress(0x57) task.wait(0.1) keyrelease(0x57)
+            task.wait(0.2)
+            keypress(0x0D) task.wait(0.1) keyrelease(0x0D)
+        else
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.A, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.A, false, game)
+            task.wait(0.2)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+            task.wait(0.2)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+            task.wait(0.2)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+        end
+        
+        task.wait(1.0)
+        
+        -- Accept
+        if keypress then
+            keypress(0x53) task.wait(0.1) keyrelease(0x53)
+            task.wait(0.2)
+            keypress(0x0D) task.wait(0.1) keyrelease(0x0D)
+        else
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.S, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.S, false, game)
+            task.wait(0.2)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+        end
+        
+        task.wait(7)
+        
+        -- Confirm deal
+        if keypress then
+            keypress(0x53) task.wait(0.1) keyrelease(0x53)
+            task.wait(0.2)
+            keypress(0x57) task.wait(0.1) keyrelease(0x57)
+            task.wait(0.2)
+            keypress(0x0D) task.wait(0.1) keyrelease(0x0D)
+        else
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.S, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.S, false, game)
+            task.wait(0.2)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+            task.wait(0.2)
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+        end
+        
+        task.wait(1.0)
+        
+        -- Turn off UI nav
+        if keypress then
+            keypress(220) task.wait(0.1) keyrelease(220)
+        else
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Backslash, false, game)
+            task.wait(0.1)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Backslash, false, game)
+        end
+        
+        task.wait(1)
+        print("[AUTO SELL] Complete")
+        IsSelling = false
+    end
+end
+
+-- ============================================================================
+-- ROCK FINDING & PRIORITY
+-- ============================================================================
+local function GetRockPriority(rockName)
+    for i, name in ipairs(PriorityRocks) do
+        if name == rockName then return i end
+    end
+    return nil
+end
+
+local function AddRockToPriority(rockName)
+    for i = #PriorityRocks, 1, -1 do
+        if PriorityRocks[i] == rockName then
+            table.remove(PriorityRocks, i)
+        end
+    end
+    
+    table.insert(PriorityRocks, rockName)
+    
+    while #PriorityRocks > MaxPriorities do
+        table.remove(PriorityRocks, 1)
+    end
+    
+    EnabledRocks[rockName] = true
+    
+    print("[PRIORITY] ⭐ Added to priority list:")
+    for i, name in ipairs(PriorityRocks) do
+        print("  Priority " .. i .. ": " .. name)
+    end
+end
+
+local function RemoveRockFromPriority(rockName)
+    for i = #PriorityRocks, 1, -1 do
+        if PriorityRocks[i] == rockName then
+            table.remove(PriorityRocks, i)
+            print("[PRIORITY] ✖ Removed from priority: " .. rockName)
+            return true
+        end
+    end
+    return false
+end
+
+local function FindPriorityRock(priorityLevel)
+    if priorityLevel < 1 or priorityLevel > #PriorityRocks then
+        return nil
+    end
+    
+    local targetRockName = PriorityRocks[priorityLevel]
+    if not targetRockName then return nil end
+    
+    local Char = LocalPlayer.Character
+    if not Char then return nil end
+    local Root = Char:FindFirstChild("HumanoidRootPart")
+    if not Root then return nil end
+    
+    local MyPos = Root.Position
+    local Closest = nil
+    local MinDist = 999999
+    
+    for _, Rock in ipairs(ActiveRocks) do
+        local RName = SafeGetName(Rock)
+        if RName == targetRockName and EnabledRocks[RName] == true then
+            local HP = GetRockHealth(Rock)
+            local MaxHP = GetRockMaxHealth(Rock)
+            local IsFresh = (MaxHP > 0 and HP >= MaxHP) or (MaxHP == 0 and HP > 0)
+            
+            if IsFresh then
+                local Pos = GetPosition(Rock)
+                if Pos then
+                    local Dist = vector.magnitude(Pos - MyPos)
+                    if Dist < MinDist then
+                        MinDist = Dist
+                        Closest = Rock
+                    end
+                end
+            end
+        end
+    end
+    
+    return Closest, priorityLevel
+end
+
+local function GarbageCollect()
+    for i = #ActiveRocks, 1, -1 do
+        if not IsValid(ActiveRocks[i]) then
+            table.remove(ActiveRocks, i)
+        end
+    end
+    
+    for i = #ActiveOres, 1, -1 do
+        if not IsValid(ActiveOres[i]) then
+            table.remove(ActiveOres, i)
+        end
+    end
+    
+    if CurrentTarget then
+        if not IsValid(CurrentTarget) or GetRockHealth(CurrentTarget) <= 0 then
+            if GetRockHealth(CurrentTarget) <= 0 and IsValid(CurrentTarget) then
+                local rockName = SafeGetName(CurrentTarget)
+                if rockName then
+                    SessionStats.RocksMined[rockName] = (SessionStats.RocksMined[rockName] or 0) + 1
+                    SessionStats.TotalRocks = SessionStats.TotalRocks + 1
+                    RecordOreCollection(CurrentTarget)
+                end
+            end
+            CurrentTarget = nil
+            TargetLocked = false
+        end
+    end
+    
+    if SavedMiningTarget then
+        if not IsValid(SavedMiningTarget) or GetRockHealth(SavedMiningTarget) <= 0 then
+            SavedMiningTarget = nil
+        end
+    end
+    
+    if CurrentMobTarget then
+        if not IsAlive(CurrentMobTarget) then
+            CurrentMobTarget = nil
+            InCombat = false
+        end
+    end
+end
+
+local function FindVolcanicRock()
+    local Char = LocalPlayer.Character
+    if not Char then return nil end
+    local Root = Char:FindFirstChild("HumanoidRootPart")
+    if not Root then return nil end
+    
+    local MyPos = Root.Position
+    local Closest = nil
+    local MinDist = 999999
+
+    for _, Rock in ipairs(ActiveRocks) do
+        if IsVolcanic(Rock) then
+            local HP = GetRockHealth(Rock)
+            local MaxHP = GetRockMaxHealth(Rock)
+            local IsFresh = (MaxHP > 0 and HP >= MaxHP) or (MaxHP == 0 and HP > 0)
+            
+            if IsFresh then
+                local Pos = GetPosition(Rock)
+                if Pos then
+                    local Dist = vector.magnitude(Pos - MyPos)
+                    if Dist < MinDist then
+                        MinDist = Dist
+                        Closest = Rock
+                    end
+                end
+            end
+        end
+    end
+    return Closest
+end
+
+local function FindNearestRock()
+    local Char = LocalPlayer.Character
+    if not Char then return nil end
+    local Root = Char:FindFirstChild("HumanoidRootPart")
+    if not Root then return nil end
+    
+    local MyPos = Root.Position
+    local Closest = nil
+    local MinDist = 999999
+    local NextClosest = nil
+    local NextMinDist = 999999
+
+    -- Count enabled rocks for debug
+    local enabledCount = 0
+    for name, enabled in pairs(EnabledRocks) do
+        if enabled then
+            enabledCount = enabledCount + 1
+        end
+    end
+    
+
+    -- PRIORITY SYSTEM
+    for priority = 1, #PriorityRocks do
+        local PriorityTarget, level = FindPriorityRock(priority)
+        if PriorityTarget then
+            local priorityName = PriorityRocks[priority]
+            SessionStats.NextRock = priorityName .. " [P" .. priority .. " ⭐]"
+            return PriorityTarget
+        end
+    end
+
+    -- VOLCANIC PRIORITY
+    if Config.PriorityVolcanic then
+        local Volcanic = FindVolcanicRock()
+        if Volcanic then
+            SessionStats.NextRock = "Volcanic Rock"
+            return Volcanic
+        end
+    end
+
+    -- NORMAL ROCKS
+    local checkedRocks = 0
+    local enabledRocksFound = 0
+    
+    for _, Rock in ipairs(ActiveRocks) do
+        local RName = SafeGetName(Rock)
+        if RName then
+            checkedRocks = checkedRocks + 1
+            if EnabledRocks[RName] == true then
+                enabledRocksFound = enabledRocksFound + 1
+                local HP = GetRockHealth(Rock)
+                local MaxHP = GetRockMaxHealth(Rock)
+                local IsFresh = (MaxHP > 0 and HP >= MaxHP) or (MaxHP == 0 and HP > 0)
+                
+                if IsFresh then
+                    local Pos = GetPosition(Rock)
+                    if Pos then
+                        local Dist = vector.magnitude(Pos - MyPos)
+                        if Dist < MinDist then
+                            NextMinDist = MinDist
+                            NextClosest = Closest
+                            MinDist = Dist
+                            Closest = Rock
+                        elseif Dist < NextMinDist then
+                            NextMinDist = Dist
+                            NextClosest = Rock
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    
+    if Closest then
+    else
+    end
+    
+    if NextClosest then
+        local nextName = SafeGetName(NextClosest)
+        local priority = GetRockPriority(nextName)
+        if priority then
+            SessionStats.NextRock = nextName .. " [P" .. priority .. " ⭐]"
+        else
+            SessionStats.NextRock = nextName
+        end
+    else
+        SessionStats.NextRock = nil
+    end
+    
+    return Closest
+end
+
+local function CheckAutoEquip(Character)
+    if not Config.AutoEquip then return end
+    if os.clock() - EquipDebounce < 1 then return end
+    
+    local Tool = Character:FindFirstChild(Config.ToolName)
+    if not Tool then
+        local Backpack = LocalPlayer.Backpack
+        if Backpack and Backpack:FindFirstChild(Config.ToolName) then
+            if keypress then
+                keypress(49)
+                keyrelease(49)
+            end
+            EquipDebounce = os.clock()
+        end
+    end
+end
+
+local function PerformScan()
+    local MainFolder = Workspace:FindFirstChild(Config.FolderName)
+    if not MainFolder then return end
+    
+    local ScanTarget = MainFolder
+    if Config.OnlyLava then
+        local Lava = MainFolder:FindFirstChild(Config.LavaFolder)
+        if Lava then
+            ScanTarget = Lava
+        else
+            ActiveRocks = {}
+            return
+        end
+    end
+    
+    local FoundInstances = {}
+    local success, Descendants = pcall(function() return ScanTarget:GetDescendants() end)
+    
+    if not success then return end
+    
+    local scannedCount = 0
+    local foundCount = 0
+    
+    for _, Obj in ipairs(Descendants) do
+        if Obj.ClassName == "Model" then
+            scannedCount = scannedCount + 1
+            local H = SafeGetAttribute(Obj, "Health")
+            if H and tonumber(H) > 0 then
+                foundCount = foundCount + 1
+                table.insert(FoundInstances, Obj)
+                local N = Obj.Name
+                if not RockNamesSet[N] then
+                    RockNamesSet[N] = true
+                    table.insert(RockList, N)
+                    table.sort(RockList)
+                    if EnabledRocks[N] == nil then
+                        -- Check if this rock type is in CustomSettings EnabledRocks
+                        if CustomSettings.EnabledRocks and CustomSettings.EnabledRocks[N] ~= nil then
+                            EnabledRocks[N] = CustomSettings.EnabledRocks[N]
+                        else
+                            EnabledRocks[N] = false
+                        end
+                    end
+                    if SessionStats.RocksMined[N] == nil then
+                        SessionStats.RocksMined[N] = 0
+                    end
+                end
+            end
+        end
+    end
+    
+    ActiveRocks = FoundInstances
+    
+    if foundCount > 0 and foundCount ~= #ActiveRocks then
+        print("[SCAN] Found " .. foundCount .. " rocks (scanned " .. scannedCount .. " models)")
+    end
+end
+
+-- Auto-scan on load
+task.spawn(function()
+    task.wait(2)
+    
+    local world = DetectWorld()
+    print("[Auto-Scan] Detected World: " .. world)
+    
+    local Found = FindMerchant()
+    if Found then
+        local scannedVec = vector.create(Found.x, Found.y, Found.z)
+        local correctedVec = ValidateAndCorrectMerchantPos(scannedVec)
+        Config.MerchantPos = correctedVec
+        print("[Auto-Scan] ✓ Merchant position set!")
+    else
+        print("[Auto-Scan] ⚠ Using default position")
+    end
+end)
+
+task.spawn(function()
+    while true do
+        pcall(PerformScan)
+        pcall(PerformAutoSell)
+        pcall(PerformAutoPotions)
+        
+        if Config.EspEnabled then
+            local FoundOres = {}
+            local Target = Workspace:FindFirstChild(Config.FolderName)
+            if Config.OnlyLava and Target then
+                Target = Target:FindFirstChild(Config.LavaFolder)
+            end
+
+            if Target then
+                local success, Descendants = pcall(function() return Target:GetDescendants() end)
+                if success then
+                    for _, Obj in ipairs(Descendants) do
+                        if Obj.Name == "Ore" then
+                            table.insert(FoundOres, Obj)
+                        end
+                    end
+                end
+                ActiveOres = FoundOres
+            end
+        else
+            ActiveOres = {}
+        end
+        task.wait(Config.AutoScanRate)
+    end
+end)
+
+-- ============================================================================
+-- UI RENDERING (Continued in next part due to length)
+-- ============================================================================
+local function IsMouseInRect(MousePos, RectX, RectY, RectW, RectH)
+    return MousePos.x >= RectX and MousePos.x <= RectX + RectW and
+           MousePos.y >= RectY and MousePos.y <= RectY + RectH
+end
+
+local function CheckClick()
+    local IsPressed = false
+    if isleftpressed then
+        IsPressed = isleftpressed()
+    end
+    
+    if IsPressed and not MouseState.WasPressed then
+        MouseState.WasPressed = true
+        return true
+    end
+    
+    MouseState.WasPressed = IsPressed
+    return false
+end
+
+-- Game logic loop (movement, combat, mining) - runs on task.wait()
+local function GameLoop()
+    -- MAIN FARMING LOGIC
+    if IsSelling or IsBuyingPotions then return end
+    
+    pcall(GarbageCollect)
+    pcall(UpdateOreTracker)
+
+    local Char = LocalPlayer.Character
+    if Char then
+        pcall(CheckAutoEquip, Char)
+    end
+
+    if Char and Char:FindFirstChild("HumanoidRootPart") then
+        local MyRoot = Char.HumanoidRootPart
+        local DeltaTime = 0.03
+        
+        if Config.MainEnabled then
+            local NearbyMob = FindNearestMob(MyRoot.Position)
+            
+            if NearbyMob and Config.MobCombatMode ~= "Disabled" then
+                InCombat = true
+                
+                if Config.MobCombatMode == "Kill" then
+                    if CurrentTarget and not SavedMiningTarget then
+                        SavedMiningTarget = CurrentTarget
+                    end
+                    
+                    CurrentMobTarget = NearbyMob
+                    CurrentTarget = nil
+                    TargetLocked = false
+                    
+                    local MobRoot = NearbyMob:FindFirstChild("HumanoidRootPart")
+                    if MobRoot then
+                        local MobPos = MobRoot.Position
+                        local GoalPos = vector.create(MobPos.x, MobPos.y - Config.CombatUnderOffset, MobPos.z)
+                        local Diff = MyRoot.Position - GoalPos
+                        local Dist = vector.magnitude(Diff)
+                        
+                        if Dist > Config.MineDistance then
+                            SkyHopMove(MyRoot, GoalPos, DeltaTime)
+                        else
+                            EquipTool(Config.WeaponName, 50)
+                            local LookAt = Vector3.new(MobPos.x, MobPos.y, MobPos.z)
+                            local Pos = Vector3.new(GoalPos.x, GoalPos.y, GoalPos.z)
+                            MyRoot.CFrame = CFrame.lookAt(Pos, LookAt)
+                            MyRoot.Velocity = vector.zero
+                            if mouse1click then mouse1click() end
+                        end
+                    end
+                    
+                elseif Config.MobCombatMode == "Spam" then
+                    SpamWeaponSwitch()
+                end
+            else
+                InCombat = false
+                CurrentMobTarget = nil
+                
+                -- Restore mining target after combat
+                if SavedMiningTarget and not CurrentTarget then
+                    if IsValid(SavedMiningTarget) and GetRockHealth(SavedMiningTarget) > 0 then
+                        CurrentTarget = SavedMiningTarget
+                        TargetLocked = true
+                    else
+                    end
+                    SavedMiningTarget = nil
+                elseif not CurrentTarget then
+                end
+                
+                if CurrentTarget then
+                    
+                    if not IsValid(CurrentTarget) then
+                        CurrentTarget = nil
+                        TargetLocked = false
+                        return
+                    end
+                    
+                    local HP = GetRockHealth(CurrentTarget)
+                    if HP <= 0 then
+                        CurrentTarget = nil
+                        TargetLocked = false
+                        return
+                    end
+
+                    local MaxHP = GetRockMaxHealth(CurrentTarget)
+                    local OrePos = GetPosition(CurrentTarget)
+                    if not OrePos then
+                        CurrentTarget = nil
+                        TargetLocked = false
+                        return
+                    end
+                    
+                    SessionStats.CurrentRock = SafeGetName(CurrentTarget)
+                    SessionStats.CurrentRockHP = HP
+                    SessionStats.CurrentRockMaxHP = MaxHP
+                    
+                    local Y_Offset = (Config.MiningPosition == "Under") and -Config.UnderOffset or Config.AboveOffset
+                    local GoalPos = vector.create(OrePos.x, OrePos.y + Y_Offset, OrePos.z)
+                    
+                    local DistToRock = vector.magnitude(MyRoot.Position - OrePos)
+                    if DistToRock > 15 and MaxHP > 0 and HP < MaxHP and not TargetLocked then
+                        CurrentTarget = nil
+                        return
+                    end
+
+                    if Config.PriorityVolcanic and not IsVolcanic(CurrentTarget) then
+                        local PriorityRock = FindVolcanicRock()
+                        if PriorityRock then
+                            CurrentTarget = PriorityRock
+                            TargetLocked = false
+                            return
+                        end
+                    end
+
+                    local HasWanted, AllOres = HasAnyWantedOre(CurrentTarget)
+                    
+                    if AllOres and #AllOres > 0 then
+                        if Config.FilterEnabled then
+                            local ApplyFilter = true
+                            
+                            if Config.FilterVolcanicOnly and not IsVolcanic(CurrentTarget) then
+                                ApplyFilter = false
+                            end
+                            
+                            if ApplyFilter and not HasWanted then
+                                CurrentTarget = nil
+                                TargetLocked = false
+                                return
+                            end
+                        end
+                    end
+
+                    local Diff = MyRoot.Position - GoalPos
+                    local Dist = vector.magnitude(Diff)
+                    
+                    
+                    -- When using smooth movement, start mining when reasonably close
+                    local miningRange = Config.UseSmoothMovement and (Config.MineDistance + 5) or Config.MineDistance
+                    
+                    
+                    if Dist > miningRange then
+                        -- Keep moving to position
+                        local arrived = SkyHopMove(MyRoot, GoalPos, DeltaTime)
+                        -- Don't mine until we're close enough
+                    else
+                        -- Close enough to mine
+                        local CurrentHP = GetRockHealth(CurrentTarget)
+                        local MaxHP_Real = GetRockMaxHealth(CurrentTarget)
+
+                        if CurrentHP <= 0 then
+                            CurrentTarget = nil
+                            TargetLocked = false
+                            return
+                        end
+
+                        if not TargetLocked then
+                            if MaxHP_Real > 0 and CurrentHP < MaxHP_Real then
+                                CurrentTarget = nil
+                                return
+                            else
+                                TargetLocked = true
+                            end
+                        end
+
+                        if Config.AutoEquip then
+                            EquipTool(Config.ToolName, 49)
+                        end
+
+                        local LookAt = Vector3.new(OrePos.x, OrePos.y, OrePos.z)
+                        local Pos = Vector3.new(GoalPos.x, GoalPos.y, GoalPos.z)
+                        MyRoot.CFrame = CFrame.lookAt(Pos, LookAt)
+                        MyRoot.Velocity = vector.zero
+                        
+                        if os.clock() - LastMineClick > Config.ClickDelay then
+                            if mouse1click then mouse1click() end
+                            LastMineClick = os.clock()
+                        end
+                    end
+                else
+                    SessionStats.CurrentRock = nil
+                    SessionStats.CurrentRockHP = 0
+                    SessionStats.CurrentRockMaxHP = 0
+                    CurrentTarget = FindNearestRock()
+                    TargetLocked = false
+                    
+                    if CurrentTarget then
+                    else
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- UI Rendering loop - ONLY for drawing, runs on Render event
+local function RenderUI()
+    local MousePos = MouseService:GetMouseLocation()
+    local Clicked = CheckClick()
+    local IsLeftDown = false
+    if isleftpressed then
+        IsLeftDown = isleftpressed()
+    end
+
+    -- DRAG LOGIC
+    if IsLeftDown then
+        if not MainUI.Dragging and not FilterUI.Dragging and not StatsUI.Dragging and not OreTrackerUI.Dragging and not PotionUI.Dragging then
+            if MainUI.Visible and IsMouseInRect(MousePos, MainUI.X, MainUI.Y, MainUI.Width, 30) then
+                MainUI.Dragging = true
+                MainUI.DragOffset.x = MousePos.x - MainUI.X
+                MainUI.DragOffset.y = MousePos.y - MainUI.Y
+            elseif FilterUI.Visible and IsMouseInRect(MousePos, FilterUI.X, FilterUI.Y, FilterUI.Width, 30) then
+                FilterUI.Dragging = true
+                FilterUI.DragOffset.x = MousePos.x - FilterUI.X
+                FilterUI.DragOffset.y = MousePos.y - FilterUI.Y
+            elseif StatsUI.Visible and IsMouseInRect(MousePos, StatsUI.X, StatsUI.Y, StatsUI.Width, 30) then
+                StatsUI.Dragging = true
+                StatsUI.DragOffset.x = MousePos.x - StatsUI.X
+                StatsUI.DragOffset.y = MousePos.y - StatsUI.Y
+            elseif OreTrackerUI.Visible and IsMouseInRect(MousePos, OreTrackerUI.X, OreTrackerUI.Y, OreTrackerUI.Width, 30) then
+                OreTrackerUI.Dragging = true
+                OreTrackerUI.DragOffset.x = MousePos.x - OreTrackerUI.X
+                OreTrackerUI.DragOffset.y = MousePos.y - OreTrackerUI.Y
+            elseif PotionUI.Visible and IsMouseInRect(MousePos, PotionUI.X, PotionUI.Y, PotionUI.Width, 30) then
+                PotionUI.Dragging = true
+                PotionUI.DragOffset.x = MousePos.x - PotionUI.X
+                PotionUI.DragOffset.y = MousePos.y - PotionUI.Y
+            end
+        end
+        
+        if MainUI.Dragging then
+            MainUI.X = MousePos.x - MainUI.DragOffset.x
+            MainUI.Y = MousePos.y - MainUI.DragOffset.y
+            
+            StatsUI.X = MainUI.X + MainUI.Width + 10
+            StatsUI.Y = MainUI.Y
+            
+            OreTrackerUI.X = StatsUI.X + StatsUI.Width + 10
+            OreTrackerUI.Y = MainUI.Y
+            
+            PotionUI.X = OreTrackerUI.X + OreTrackerUI.Width + 10
+            PotionUI.Y = MainUI.Y
+        end
+        
+        if FilterUI.Dragging then
+            FilterUI.X = MousePos.x - FilterUI.DragOffset.x
+            FilterUI.Y = MousePos.y - FilterUI.DragOffset.y
+        end
+        
+        if StatsUI.Dragging then
+            StatsUI.X = MousePos.x - StatsUI.DragOffset.x
+            StatsUI.Y = MousePos.y - StatsUI.DragOffset.y
+        end
+        
+        if OreTrackerUI.Dragging then
+            OreTrackerUI.X = MousePos.x - OreTrackerUI.DragOffset.x
+            OreTrackerUI.Y = MousePos.y - OreTrackerUI.DragOffset.y
+        end
+        
+        if PotionUI.Dragging then
+            PotionUI.X = MousePos.x - PotionUI.DragOffset.x
+            PotionUI.Y = MousePos.y - PotionUI.DragOffset.y
+        end
+    else
+        MainUI.Dragging = false
+        FilterUI.Dragging = false
+        StatsUI.Dragging = false
+        OreTrackerUI.Dragging = false
+        PotionUI.Dragging = false
+    end
+
+    -- TOGGLE BUTTON
+    DrawingImmediate.FilledRectangle(
+        vector.create(MainUI.ToggleBtn.X, MainUI.ToggleBtn.Y, 0),
+        vector.create(MainUI.ToggleBtn.W, MainUI.ToggleBtn.H, 0),
+        MainUI.Visible and Colors.On or Colors.Off,
+        1
+    )
+    
+    DrawingImmediate.Text(
+        vector.create(MainUI.ToggleBtn.X + 20, MainUI.ToggleBtn.Y + 12, 0),
+        14,
+        Color3.new(0,0,0),
+        1,
+        "Ore",
+        true,
+        nil
+    )
+    
+    if Clicked and IsMouseInRect(MousePos, MainUI.ToggleBtn.X, MainUI.ToggleBtn.Y, MainUI.ToggleBtn.W, MainUI.ToggleBtn.H) then
+        MainUI.Visible = not MainUI.Visible
+    end
+
+    -- MAIN WINDOW
+    if MainUI.Visible then
+        local ItemCount = math.max(1, #RockList)
+        local TotalHeight = MainUI.BaseHeight + (ItemCount * 22) + 20
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(MainUI.X, MainUI.Y, 0),
+            vector.create(MainUI.Width, TotalHeight, 0),
+            Colors.Bg,
+            0.95
+        )
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(MainUI.X, MainUI.Y, 0),
+            vector.create(MainUI.Width, 30, 0),
+            Colors.Header,
+            1
+        )
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(MainUI.X + 10, MainUI.Y + 8, 0),
+            16,
+            Colors.Text,
+            1,
+            "Ore Farm v2.0",
+            false,
+            nil
+        )
+        
+        local Y = 35
+        local function MainBtn(Txt, Col, Act)
+            DrawingImmediate.FilledRectangle(
+                vector.create(MainUI.X + 10, MainUI.Y + Y, 0),
+                vector.create(MainUI.Width - 20, 25, 0),
+                Col,
+                1
+            )
+            
+            DrawingImmediate.Text(
+                vector.create(MainUI.X + 20, MainUI.Y + Y + 5, 0),
+                16,
+                Colors.Text,
+                1,
+                Txt,
+                false,
+                nil
+            )
+            
+            if Clicked and IsMouseInRect(MousePos, MainUI.X + 10, MainUI.Y + Y, MainUI.Width - 20, 25) then
+                pcall(Act)
+            end
+            
+            Y = Y + 30
+        end
+
+        MainBtn(
+            Config.MainEnabled and "FARMING: ON" or "FARMING: OFF",
+            Config.MainEnabled and Colors.On or Colors.Off,
+            function()
+                Config.MainEnabled = not Config.MainEnabled
+                CurrentTarget = nil
+                CurrentMobTarget = nil
+                SavedMiningTarget = nil
+                TargetLocked = false
+                InCombat = false
+            end
+        )
+        
+        MainBtn(
+            Config.OnlyLava and "ONLY LAVA: ON" or "ONLY LAVA: OFF",
+            Config.OnlyLava and Colors.On or Colors.Off,
+            function()
+                Config.OnlyLava = not Config.OnlyLava
+                ActiveRocks = {}
+                ActiveOres = {}
+                RockNamesSet = {}
+                RockList = {}
+                CurrentTarget = nil
+                CurrentMobTarget = nil
+                SavedMiningTarget = nil
+                TargetLocked = false
+                InCombat = false
+            end
+        )
+
+        MainBtn(
+            Config.PriorityVolcanic and "PRIO VOLCANIC: ON" or "PRIO VOLCANIC: OFF",
+            Config.PriorityVolcanic and Colors.On or Colors.Off,
+            function()
+                Config.PriorityVolcanic = not Config.PriorityVolcanic
+                CurrentTarget = nil
+                TargetLocked = false
+            end
+        )
+
+        local CombatTxt = "COMBAT: " .. Config.MobCombatMode
+        local CombatCol = Colors.Combat
+        if Config.MobCombatMode == "Disabled" then
+            CombatCol = Colors.Off
+        elseif Config.MobCombatMode == "Kill" then
+            CombatCol = Colors.On
+        end
+        
+        MainBtn(
+            CombatTxt,
+            CombatCol,
+            function()
+                if Config.MobCombatMode == "Kill" then
+                    Config.MobCombatMode = "Spam"
+                elseif Config.MobCombatMode == "Spam" then
+                    Config.MobCombatMode = "Disabled"
+                else
+                    Config.MobCombatMode = "Kill"
+                end
+            end
+        )
+
+        MainBtn(
+            "MINE POS: " .. (Config.MiningPosition == "Under" and "UNDER" or "ABOVE"),
+            Colors.Btn,
+            function()
+                Config.MiningPosition = (Config.MiningPosition == "Under") and "Above" or "Under"
+                CurrentTarget = nil
+            end
+        )
+        
+        MainBtn(
+            Config.AutoSell and "AUTO SELL: ON" or "AUTO SELL: OFF",
+            Config.AutoSell and Colors.On or Colors.Off,
+            function()
+                Config.AutoSell = not Config.AutoSell
+            end
+        )
+        
+        if Config.AutoPotion then
+            MainBtn(
+                Config.AutoPotion.Enabled and "AUTO POTION: ON" or "AUTO POTION: OFF",
+                Config.AutoPotion.Enabled and Colors.On or Color3.fromRGB(200, 100, 255),
+                function()
+                    Config.AutoPotion.Enabled = not Config.AutoPotion.Enabled
+                    PotionUI.Visible = Config.AutoPotion.Enabled
+                    
+                    if Config.AutoPotion.Enabled then
+                        print("[AUTO POTION] System enabled - scanning and using potions...")
+                        
+                        -- Rescan slots
+                        ScanPotionSlots()
+                        task.wait(0.5)
+                        
+                        -- Force immediate refresh by setting all timers to expired
+                        local currentTime = os.clock()
+                        for potionName, enabled in pairs(Config.AutoPotion) do
+                            if enabled == true and potionName ~= "Enabled" then
+                                PotionTimers[potionName] = currentTime - 1
+                            end
+                        end
+                        
+                        -- Trigger immediate potion cycle
+                        task.spawn(function()
+                            task.wait(0.5)
+                            PerformAutoPotions()
+                        end)
+                    end
+                end
+            )
+        end
+
+        MainBtn(
+            Config.EspEnabled and "ORE ESP: ON" or "ORE ESP: OFF",
+            Config.EspEnabled and Colors.On or Colors.Off,
+            function()
+                Config.EspEnabled = not Config.EspEnabled
+            end
+        )
+        
+        MainBtn(
+            Config.AutoEquip and "Auto Pickaxe: ON" or "Auto Pickaxe: OFF",
+            Config.AutoEquip and Colors.On or Colors.Off,
+            function()
+                Config.AutoEquip = not Config.AutoEquip
+            end
+        )
+        
+        MainBtn(
+            FilterUI.Visible and "Close Filter Menu" or "Open Filter Menu",
+            Colors.Gold,
+            function()
+                FilterUI.Visible = not FilterUI.Visible
+            end
+        )
+
+        Y = Y + 10
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(MainUI.X + 10, MainUI.Y + Y, 0),
+            14,
+            Colors.Text,
+            1,
+            "Select Rocks to Farm:",
+            false,
+            nil
+        )
+        
+        Y = Y + 20
+        
+        for i, Name in ipairs(RockList) do
+            local IsOn = EnabledRocks[Name]
+            local PriorityLevel = GetRockPriority(Name)
+            
+            local bgColor = IsOn and Colors.On or Colors.Off
+            if PriorityLevel then
+                if PriorityLevel == 1 then
+                    bgColor = Color3.fromRGB(255, 215, 0)
+                elseif PriorityLevel == 2 then
+                    bgColor = Color3.fromRGB(255, 165, 0)
+                elseif PriorityLevel == 3 then
+                    bgColor = Color3.fromRGB(255, 120, 0)
+                end
+            end
+            
+            DrawingImmediate.FilledRectangle(
+                vector.create(MainUI.X + 10, MainUI.Y + Y, 0),
+                vector.create(MainUI.Width - 20, 20, 0),
+                bgColor,
+                1
+            )
+            
+            local displayName = Name
+            if PriorityLevel then
+                displayName = "[P" .. PriorityLevel .. "] " .. Name
+            end
+            
+            DrawingImmediate.Text(
+                vector.create(MainUI.X + 20, MainUI.Y + Y + 2, 0),
+                14,
+                Colors.Text,
+                1,
+                displayName,
+                false,
+                nil
+            )
+            
+            if Clicked and IsMouseInRect(MousePos, MainUI.X + 10, MainUI.Y + Y, MainUI.Width - 20, 20) then
+                local currentTime = os.clock()
+                local lastClick = LastRockClick[Name] or 0
+                
+                if currentTime - lastClick <= DoubleClickDelay then
+                    if PriorityLevel then
+                        RemoveRockFromPriority(Name)
+                    else
+                        AddRockToPriority(Name)
+                    end
+                    LastRockClick[Name] = 0
+                else
+                    EnabledRocks[Name] = not EnabledRocks[Name]
+                    if not EnabledRocks[Name] and PriorityLevel then
+                        RemoveRockFromPriority(Name)
+                    end
+                    LastRockClick[Name] = currentTime
+                end
+                
+                CurrentTarget = nil
+                TargetLocked = false
+            end
+            Y = Y + 22
+        end
+    end
+
+    -- FILTER WINDOW
+    if FilterUI.Visible then
+        local CatList = OreDatabase[FilterUI.CurrentCategory] or {}
+        local F_TotalHeight = FilterUI.BaseHeight + (#CatList * 22)
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(FilterUI.X, FilterUI.Y, 0),
+            vector.create(FilterUI.Width, F_TotalHeight, 0),
+            Colors.Bg,
+            0.95
+        )
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(FilterUI.X, FilterUI.Y, 0),
+            vector.create(FilterUI.Width, 30, 0),
+            Colors.Header,
+            1
+        )
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(FilterUI.X + 10, FilterUI.Y + 8, 0),
+            16,
+            Colors.Text,
+            1,
+            "Ore Filter",
+            false,
+            nil
+        )
+        
+        local FY = 35
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(FilterUI.X + 10, FilterUI.Y + FY, 0),
+            vector.create(FilterUI.Width - 20, 25, 0),
+            Config.FilterEnabled and Colors.On or Colors.Off,
+            1
+        )
+        
+        DrawingImmediate.Text(
+            vector.create(FilterUI.X + 60, FilterUI.Y + FY + 5, 0),
+            16,
+            Colors.Text,
+            1,
+            Config.FilterEnabled and "FILTER: ACTIVE" or "FILTER: DISABLED",
+            false,
+            nil
+        )
+        
+        if Clicked and IsMouseInRect(MousePos, FilterUI.X + 10, FilterUI.Y + FY, FilterUI.Width - 20, 25) then
+            Config.FilterEnabled = not Config.FilterEnabled
+        end
+        FY = FY + 30
+
+        DrawingImmediate.FilledRectangle(
+            vector.create(FilterUI.X + 10, FilterUI.Y + FY, 0),
+            vector.create(FilterUI.Width - 20, 25, 0),
+            Config.FilterVolcanicOnly and Colors.On or Colors.Off,
+            1
+        )
+        
+        DrawingImmediate.Text(
+            vector.create(FilterUI.X + 60, FilterUI.Y + FY + 5, 0),
+            16,
+            Colors.Text,
+            1,
+            Config.FilterVolcanicOnly and "VOLCANIC ONLY: ON" or "VOLCANIC ONLY: OFF",
+            false,
+            nil
+        )
+        
+        if Clicked and IsMouseInRect(MousePos, FilterUI.X + 10, FilterUI.Y + FY, FilterUI.Width - 20, 25) then
+            Config.FilterVolcanicOnly = not Config.FilterVolcanicOnly
+        end
+        FY = FY + 35
+
+        local btnW = (FilterUI.Width - 40) / 4
+        local Cats = {"Stonewake", "Forgotten", "Goblin", "Frostpire"}
+        
+        for i, Cat in ipairs(Cats) do
+            local bx = FilterUI.X + 10 + ((i-1) * (btnW + 5))
+            local isSel = FilterUI.CurrentCategory == Cat
+            
+            DrawingImmediate.FilledRectangle(
+                vector.create(bx, FilterUI.Y + FY, 0),
+                vector.create(btnW, 25, 0),
+                isSel and Colors.Gold or Colors.Btn,
+                1
+            )
+            
+            DrawingImmediate.Text(
+                vector.create(bx + 5, FilterUI.Y + FY + 5, 0),
+                14,
+                Colors.Text,
+                1,
+                Cat,
+                false,
+                nil
+            )
+            
+            if Clicked and IsMouseInRect(MousePos, bx, FilterUI.Y + FY, btnW, 25) then
+                FilterUI.CurrentCategory = Cat
+            end
+        end
+        FY = FY + 35
+
+        DrawingImmediate.OutlinedText(
+            vector.create(FilterUI.X + 10, FilterUI.Y + FY, 0),
+            14,
+            Colors.Text,
+            1,
+            "Keep these ores:",
+            false,
+            nil
+        )
+        FY = FY + 20
+
+        for _, OreName in ipairs(CatList) do
+            local IsWhitelisted = Config.FilterWhitelist[OreName]
+            
+            DrawingImmediate.FilledRectangle(
+                vector.create(FilterUI.X + 10, FilterUI.Y + FY, 0),
+                vector.create(FilterUI.Width - 20, 20, 0),
+                IsWhitelisted and Colors.On or Colors.Off,
+                1
+            )
+            
+            DrawingImmediate.Text(
+                vector.create(FilterUI.X + 20, FilterUI.Y + FY + 2, 0),
+                14,
+                Colors.Text,
+                1,
+                OreName,
+                false,
+                nil
+            )
+            
+            if Clicked and IsMouseInRect(MousePos, FilterUI.X + 10, FilterUI.Y + FY, FilterUI.Width - 20, 20) then
+                Config.FilterWhitelist[OreName] = not Config.FilterWhitelist[OreName]
+                CurrentTarget = nil
+                TargetLocked = false
+            end
+            FY = FY + 22
+        end
+    end
+
+    -- STATS WINDOW
+    if StatsUI.Visible then
+        local SY = StatsUI.Y
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(StatsUI.X, SY, 0),
+            vector.create(StatsUI.Width, StatsUI.Height, 0),
+            Colors.StatsBg,
+            0.95
+        )
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(StatsUI.X, SY, 0),
+            vector.create(StatsUI.Width, 25, 0),
+            Colors.StatsHeader,
+            1
+        )
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(StatsUI.X + StatsUI.Width/2, SY + 5, 0),
+            15,
+            Colors.Text,
+            1,
+            "Session Stats",
+            true,
+            nil
+        )
+        
+        SY = SY + 30
+        
+        if #PriorityRocks > 0 then
+            for i, rockName in ipairs(PriorityRocks) do
+                local priorityColor
+                if i == 1 then
+                    priorityColor = Color3.fromRGB(255, 215, 0)
+                elseif i == 2 then
+                    priorityColor = Color3.fromRGB(255, 165, 0)
+                else
+                    priorityColor = Color3.fromRGB(255, 120, 0)
+                end
+                
+                DrawingImmediate.OutlinedText(
+                    vector.create(StatsUI.X + 10, SY, 0),
+                    12,
+                    priorityColor,
+                    1,
+                    "P" .. i .. ": " .. rockName,
+                    false,
+                    nil
+                )
+                SY = SY + 15
+            end
+            SY = SY + 3
+        end
+        
+        local sessionTime = os.clock() - SessionStats.StartTime
+        DrawingImmediate.OutlinedText(
+            vector.create(StatsUI.X + 10, SY, 0),
+            13,
+            Color3.fromRGB(200, 200, 200),
+            1,
+            "Time: " .. FormatTime(sessionTime),
+            false,
+            nil
+        )
+        SY = SY + 18
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(StatsUI.X + 10, SY, 0),
+            13,
+            Color3.fromRGB(100, 255, 100),
+            1,
+            "Rocks Mined: " .. SessionStats.TotalRocks,
+            false,
+            nil
+        )
+        SY = SY + 22
+        
+        local currentText = "Current: "
+        if CurrentTarget then
+            local rockName = SafeGetName(CurrentTarget)
+            local currentHP = GetRockHealth(CurrentTarget)
+            local maxHP = GetRockMaxHealth(CurrentTarget)
+            
+            if rockName then
+                currentText = currentText .. rockName
+                if maxHP > 0 then
+                    local percent = math.floor((currentHP / maxHP) * 100)
+                    currentText = currentText .. " (" .. percent .. "%)"
+                end
+            else
+                currentText = currentText .. "Unknown"
+            end
+        else
+            currentText = currentText .. "None"
+        end
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(StatsUI.X + 10, SY, 0),
+            12,
+            Color3.fromRGB(255, 255, 100),
+            1,
+            currentText,
+            false,
+            nil
+        )
+        SY = SY + 17
+        
+        local nextText = "Next: " .. (SessionStats.NextRock or "None")
+        DrawingImmediate.OutlinedText(
+            vector.create(StatsUI.X + 10, SY, 0),
+            12,
+            Color3.fromRGB(150, 200, 255),
+            1,
+            nextText,
+            false,
+            nil
+        )
+        SY = SY + 20
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(StatsUI.X + 10, SY, 0),
+            vector.create(StatsUI.Width - 20, 1, 0),
+            Color3.fromRGB(100, 100, 100),
+            1
+        )
+        SY = SY + 8
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(StatsUI.X + 10, SY, 0),
+            12,
+            Color3.fromRGB(180, 180, 180),
+            1,
+            "Ores Collected:",
+            false,
+            nil
+        )
+        SY = SY + 16
+        
+        local sortedOres = {}
+        for oreName, count in pairs(SessionStats.OresCollected) do
+            if count > 0 then
+                table.insert(sortedOres, {name = oreName, count = count})
+            end
+        end
+        table.sort(sortedOres, function(a, b) return a.count > b.count end)
+        
+        if #sortedOres == 0 then
+            DrawingImmediate.OutlinedText(
+                vector.create(StatsUI.X + 15, SY, 0),
+                11,
+                Color3.fromRGB(150, 150, 150),
+                1,
+                "  (None yet)",
+                false,
+                nil
+            )
+        else
+            for i = 1, math.min(5, #sortedOres) do
+                local ore = sortedOres[i]
+                DrawingImmediate.OutlinedText(
+                    vector.create(StatsUI.X + 15, SY, 0),
+                    11,
+                    Color3.fromRGB(200, 200, 200),
+                    1,
+                    "  " .. ore.name .. ": " .. ore.count,
+                    false,
+                    nil
+                )
+                SY = SY + 14
+            end
+        end
+    end
+
+    -- ORE TRACKER WINDOW
+    if OreTrackerUI.Visible then
+        local OY = OreTrackerUI.Y
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(OreTrackerUI.X, OY, 0),
+            vector.create(OreTrackerUI.Width, OreTrackerUI.Height, 0),
+            Color3.fromRGB(30, 35, 40),
+            0.95
+        )
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(OreTrackerUI.X, OY, 0),
+            vector.create(OreTrackerUI.Width, 25, 0),
+            Color3.fromRGB(60, 120, 180),
+            1
+        )
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(OreTrackerUI.X + OreTrackerUI.Width/2, OY + 5, 0),
+            15,
+            Colors.Text,
+            1,
+            "Ore Tracker",
+            true,
+            nil
+        )
+        
+        OY = OY + 30
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(OreTrackerUI.X + 10, OY, 0),
+            13,
+            Color3.fromRGB(255, 200, 100),
+            1,
+            "Current Rock:",
+            false,
+            nil
+        )
+        OY = OY + 18
+        
+        if #OreTracker.CurrentRockOres > 0 then
+            for _, oreName in ipairs(OreTracker.CurrentRockOres) do
+                local isKept = IsOreWanted(oreName)
+                local oreColor = isKept and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
+                local prefix = isKept and "✓ " or "✖ "
+                
+                DrawingImmediate.OutlinedText(
+                    vector.create(OreTrackerUI.X + 15, OY, 0),
+                    11,
+                    oreColor,
+                    1,
+                    prefix .. oreName,
+                    false,
+                    nil
+                )
+                OY = OY + 14
+            end
+        else
+            DrawingImmediate.OutlinedText(
+                vector.create(OreTrackerUI.X + 15, OY, 0),
+                11,
+                Color3.fromRGB(150, 150, 150),
+                1,
+                "  (Not revealed yet)",
+                false,
+                nil
+            )
+            OY = OY + 14
+        end
+        
+        OY = OY + 5
+        DrawingImmediate.FilledRectangle(
+            vector.create(OreTrackerUI.X + 10, OY, 0),
+            vector.create(OreTrackerUI.Width - 20, 1, 0),
+            Color3.fromRGB(100, 100, 100),
+            1
+        )
+        OY = OY + 8
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(OreTrackerUI.X + 10, OY, 0),
+            12,
+            Color3.fromRGB(180, 180, 200),
+            1,
+            "Recent Rocks:",
+            false,
+            nil
+        )
+        OY = OY + 16
+        
+        if #OreTracker.RecentRockOres == 0 then
+            DrawingImmediate.OutlinedText(
+                vector.create(OreTrackerUI.X + 15, OY, 0),
+                10,
+                Color3.fromRGB(150, 150, 150),
+                1,
+                "  (None yet)",
+                false,
+                nil
+            )
+        else
+            for i, record in ipairs(OreTracker.RecentRockOres) do
+                DrawingImmediate.OutlinedText(
+                    vector.create(OreTrackerUI.X + 15, OY, 0),
+                    10,
+                    Color3.fromRGB(200, 200, 255),
+                    1,
+                    record.rockName .. ":",
+                    false,
+                    nil
+                )
+                OY = OY + 13
+                
+                for j, oreName in ipairs(record.ores) do
+                    local isKept = IsOreWanted(oreName)
+                    local oreColor = isKept and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
+                    local prefix = isKept and "  ✓ " or "  ✖ "
+                    
+                    DrawingImmediate.OutlinedText(
+                        vector.create(OreTrackerUI.X + 20, OY, 0),
+                        9,
+                        oreColor,
+                        1,
+                        prefix .. oreName,
+                        false,
+                        nil
+                    )
+                    OY = OY + 11
+                end
+                
+                OY = OY + 3
+                if i >= 3 then break end
+            end
+        end
+    end
+
+    -- POTION PANEL
+    if Config.AutoPotion and PotionUI.Visible and Config.AutoPotion.Enabled then
+        local PX = PotionUI.X
+        local PY = PotionUI.Y
+        local PW = PotionUI.Width
+        local PH = 280
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(PX, PY, 0),
+            vector.create(PW, PH, 0),
+            Colors.PotionBg,
+            0.95
+        )
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(PX, PY, 0),
+            vector.create(PW, 25, 0),
+            Colors.PotionHeader,
+            1
+        )
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(PX + PW/2, PY + 5, 0),
+            14,
+            Colors.Text,
+            1,
+            "Active Potions",
+            true,
+            nil
+        )
+        
+        local PY_Offset = PY + 32
+        
+        local potions = {"Luck", "Miner", "Speed", "Damage", "Health"}
+        local currentTime = os.clock()
+        local hasActive = false
+        
+        for _, potionName in ipairs(potions) do
+            if Config.AutoPotion[potionName] then
+                local timeLeft = PotionTimers[potionName] - currentTime
+                
+                if timeLeft > 0 then
+                    hasActive = true
+                    local timerColor = Color3.fromRGB(100, 255, 100)
+                    
+                    if timeLeft < 300 then
+                        timerColor = Color3.fromRGB(255, 200, 0)
+                    end
+                    if timeLeft < 60 then
+                        timerColor = Color3.fromRGB(255, 100, 100)
+                    end
+                    
+                    DrawingImmediate.OutlinedText(
+                        vector.create(PX + 10, PY_Offset, 0),
+                        12,
+                        timerColor,
+                        1,
+                        potionName .. ": " .. FormatTime(timeLeft),
+                        false,
+                        nil
+                    )
+                    PY_Offset = PY_Offset + 16
+                end
+            end
+        end
+        
+        if not hasActive then
+            DrawingImmediate.OutlinedText(
+                vector.create(PX + PW/2, PY + 50, 0),
+                11,
+                Color3.fromRGB(150, 150, 150),
+                1,
+                "No active potions",
+                true,
+                nil
+            )
+        end
+        
+        PY_Offset = math.max(PY_Offset, PY + 100)
+        
+        DrawingImmediate.FilledRectangle(
+            vector.create(PX + 10, PY_Offset, 0),
+            vector.create(PW - 20, 1, 0),
+            Color3.fromRGB(100, 100, 100),
+            1
+        )
+        PY_Offset = PY_Offset + 8
+        
+        DrawingImmediate.OutlinedText(
+            vector.create(PX + 10, PY_Offset, 0),
+            11,
+            Color3.fromRGB(200, 200, 200),
+            1,
+            "Enable Potions:",
+            false,
+            nil
+        )
+        PY_Offset = PY_Offset + 18
+        
+        for _, potionName in ipairs(potions) do
+            local enabled = Config.AutoPotion[potionName]
+            local btnColor = enabled and Colors.On or Colors.Off
+            
+            DrawingImmediate.FilledRectangle(
+                vector.create(PX + 10, PY_Offset, 0),
+                vector.create(PW - 20, 18, 0),
+                btnColor,
+                1
+            )
+            
+            DrawingImmediate.Text(
+                vector.create(PX + PW/2, PY_Offset + 2, 0),
+                11,
+                Colors.Text,
+                1,
+                potionName,
+                true,
+                nil
+            )
+            
+            if Clicked and IsMouseInRect(MousePos, PX + 10, PY_Offset, PW - 20, 18) then
+                Config.AutoPotion[potionName] = not Config.AutoPotion[potionName]
+                if Config.AutoPotion[potionName] then
+                    PotionTimers[potionName] = os.clock()
+                end
+            end
+            PY_Offset = PY_Offset + 20
+        end
+    end
+
+    -- ESP RENDERING
+    if Config.EspEnabled then
+        for _, OreObj in ipairs(ActiveOres) do
+            if IsValid(OreObj) then
+                local OreName = SafeGetAttribute(OreObj, "Ore")
+                if OreName then
+                    local Pos = GetPosition(OreObj)
+                    if Pos then
+                        local success, screenData = pcall(function()
+                            return Camera:WorldToScreenPoint(Pos)
+                        end)
+                        
+                        if success and screenData then
+                            DrawingImmediate.OutlinedText(
+                                vector.create(screenData.X, screenData.Y, 0),
+                                Config.EspTextSize,
+                                Config.EspTextColor,
+                                1,
+                                "[" .. tostring(OreName) .. "]",
+                                true,
+                                nil
+                            )
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- STASH CAPACITY
+    local pName = LocalPlayer.Name
+    local Path_Capacity = "game.Players."..pName..".PlayerGui.Menu.Frame.Frame.Menus.Stash.Capacity.Text"
+    local capObj = GetObject(Path_Capacity)
+    
+    if capObj then
+        local text = GetTextMemory(capObj)
+        local current, max = text:match("(%d+)/(%d+)")
+        
+        if current and max then
+            local capText = "Stash: " .. current .. "/" .. max
+            local capColor = Colors.Text
+            
+            local percent = tonumber(current) / tonumber(max)
+            if percent >= 0.9 then
+                capColor = Colors.Off
+            elseif percent >= 0.7 then
+                capColor = Colors.Gold
+            end
+            
+            DrawingImmediate.OutlinedText(
+                vector.create(Camera.ViewportSize.X - 150, 10, 0),
+                18,
+                capColor,
+                1,
+                capText,
+                false,
+                nil
+            )
+        end
+    end
+    
+    if InCombat then
+        DrawingImmediate.OutlinedText(
+            vector.create(Camera.ViewportSize.X - 150, 40, 0),
+            18,
+            Colors.Combat,
+            1,
+            "COMBAT MODE",
+            false,
+            nil
+        )
+    end
+end
+
+RunService.Render:Connect(function()
+    pcall(RenderUI)
+end)
+
+-- Main game loop - runs separately from render
+task.spawn(function()
+    while task.wait(0.03) do
+        pcall(GameLoop)
+    end
+end)
+
+-- ============================================================================
+-- INITIAL INVENTORY SCAN
+-- ============================================================================
+task.spawn(function()
+    task.wait(3)
+    
+    print("[STARTUP] Scanning potion slots...")
+    ScanPotionSlots()
+    
+    if Config.AutoPotion and Config.AutoPotion.Enabled then
+        print("[AUTO POTION] Auto-potion is ON, will use potions on next cycle")
+        local currentTime = os.clock()
+        
+        -- Set all enabled potions to expired so they trigger on next cycle
+        for potionName, enabled in pairs(Config.AutoPotion) do
+            if enabled == true and potionName ~= "Enabled" then
+                PotionTimers[potionName] = currentTime - 1
+            end
+        end
+    end
+end)
+
+-- ============================================================================
+-- STARTUP
+-- ============================================================================
+print("===========================================")
+print("ORE FARM WITH AUTO POTIONS - v2.1")
+print("===========================================")
+print("🎯 NEW: Performance & Anti-Cheat Fixes!")
+print("• Separated render loop from game logic")
+print("• Smooth movement (lerp position)")
+print("• TweenService integration")
+print("-------------------------------------------")
+print("✓ Mob Combat: " .. Config.MobCombatMode)
+print("✓ Auto Sell: " .. tostring(Config.AutoSell))
+print("✓ Smooth Movement: " .. tostring(Config.UseSmoothMovement))
+if Config.UseSmoothMovement then
+    print("  - Tween Speed: " .. Config.TweenSpeed .. "s (Anti-Cheat Safe)")
+else
+    print("  - Travel Speed: " .. Config.TravelSpeed .. " (Instant TP)")
+end
+
+if Config.AutoPotion and type(Config.AutoPotion) == "table" then
+    print("✓ Auto Potion: " .. tostring(Config.AutoPotion.Enabled))
+    if Config.AutoPotion.Enabled then
+        local enabledPotions = {}
+        if Config.AutoPotion.Luck then 
+            table.insert(enabledPotions, "Luck x" .. PotionUsageCounts.Luck) 
+        end
+        if Config.AutoPotion.Speed then 
+            table.insert(enabledPotions, "Speed x" .. PotionUsageCounts.Speed) 
+        end
+        if Config.AutoPotion.Miner then 
+            table.insert(enabledPotions, "Miner x" .. PotionUsageCounts.Miner) 
+        end
+        if Config.AutoPotion.Damage then 
+            table.insert(enabledPotions, "Damage x" .. PotionUsageCounts.Damage) 
+        end
+        if Config.AutoPotion.Health then 
+            table.insert(enabledPotions, "Health x" .. PotionUsageCounts.Health) 
+        end
+        if #enabledPotions > 0 then
+            print("  - Potions: " .. table.concat(enabledPotions, ", "))
+        end
+    end
+else
+    print("⚠ Auto Potion: Not configured")
+end
+
+print("✓ Ore Filter: " .. tostring(Config.FilterEnabled))
+print("✓ Auto Equip: " .. tostring(Config.AutoEquip))
+print("✓ ESP: " .. tostring(Config.EspEnabled))
+print("===========================================")
+print("✨ FEATURES:")
+print("• Exact Potion Name Detection")
+print("• Multi-Priority Rock System")
+print("• Ore Tracker UI")
+print("• Session Statistics")
+print("• Dynamic Merchant Detection")
+print("• Lerp Position Movement")
+print("===========================================")
+print("⚠️  SETUP REQUIRED:")
+print("   1. Toggle FARMING: ON")
+print("   2. Click rock names to enable (green)")
+print("   3. Double-click to add to priority")
+print("===========================================")
+print("📢 CREDITS:")
+print("   • Seniors for Lua optimization advice")
+print("   • KeyAuth for render thread guidance")
+print("   • hashmka/Sploiter13 for TweenService")
+print("===========================================")
+print("Ready to farm!")
+print("===========================================")
