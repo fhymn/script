@@ -2,7 +2,8 @@
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Sploiter13/severefuncs/refs/heads/main/merge2.lua"))();
 task.wait(5)
 
-print("[Severe] Advanced Minesweeper Solver Loading...")
+print("[Severe] Minesweeper Solver Loaded")
+print("[Controls] Press X to toggle Auto-Flag")
 
 local CONFIG = {
     FlagName = "Flag",
@@ -18,18 +19,18 @@ local CONFIG = {
     Origin = Vector3.new(0, 70, 0),
     
     Delays = {
-        Logic = 0.05,  -- 20 FPS for logic
-        Render = 0.016  -- 60 FPS for rendering
+        Logic = 0.05,
+        Render = 0.016
     },
     
     TotalMines = 99,
     MineDensity = 0.207,
     
-    -- Auto-flag settings
     AutoFlag = {
-        Enabled = false,  -- Toggle with X key
+        Enabled = false,
         MinConfidence = 0.95,
-        ToggleKey = "X"
+        ToggleKey = "X",
+        MaxRange = 17
     }
 }
 
@@ -38,6 +39,19 @@ if not getgenv then
 end
 getgenv().MS_RUN = true
 getgenv().MS_AUTOFLAG = false
+
+--------------------------------------------------
+-- PRECOMPUTE PROBABILITY COLORS
+--------------------------------------------------
+
+local PROB_COLOR = {}
+local PROB_TEXT = {}
+for pct = 0, 100 do
+    local p = pct / 100
+    local hue = 0.33 * (1 - p)
+    PROB_COLOR[pct] = Color3.fromHSV(hue, 1, 1)
+    PROB_TEXT[pct] = tostring(pct) .. "%"
+end
 
 --------------------------------------------------
 -- UTILITIES
@@ -58,19 +72,6 @@ function Utils.SafeGetText(label)
 end
 
 --------------------------------------------------
--- PRECOMPUTE PROBABILITY COLORS
---------------------------------------------------
-
-local PROB_COLOR = {}
-local PROB_TEXT = {}
-for pct = 0, 100 do
-    local p = pct / 100
-    local hue = 0.33 * (1 - p)
-    PROB_COLOR[pct] = Color3.fromHSV(hue, 1, 1)
-    PROB_TEXT[pct] = tostring(pct) .. "%"
-end
-
---------------------------------------------------
 -- GRID MANAGER WITH NEIGHBOR CACHING
 --------------------------------------------------
 
@@ -83,8 +84,7 @@ local NEIGHBOR_OFFSETS = {
 local GridManager = {
     Tiles = {},
     Map = {},
-    NeighborCache = {},  -- KEY OPTIMIZATION
-    BestMove = nil
+    NeighborCache = {}
 }
 
 function GridManager.GetGridCoordinates(position)
@@ -121,28 +121,15 @@ end
 function GridManager.IsAlreadyFlagged(part)
     if not part or not part.Parent then return false end
     
-    -- Method 1: Check for Flag child (most common)
     local flagCheck = part:FindFirstChild("Flag")
-    if flagCheck then
-        return true
-    end
+    if flagCheck then return true end
     
-    -- Method 2: Check transparency (flagged tiles are often transparent)
     local transparency = Utils.SafeGet(part, "Transparency")
-    if transparency and transparency > 0.9 then
-        return true
-    end
+    if transparency and transparency > 0.9 then return true end
     
-    -- Method 3: Check color (some games change color when flagged)
     local color = Utils.SafeGet(part, "Color")
-    if color then
-        -- Check if color matches mine color (flagged tiles might turn brown/red)
-        if color == CONFIG.Colors.Mine then
-            return true
-        end
-    end
+    if color and color == CONFIG.Colors.Mine then return true end
     
-    -- Method 4: Check for flag-related children
     local children = part:GetChildren()
     for _, child in ipairs(children) do
         local name = Utils.SafeGet(child, "Name")
@@ -156,7 +143,6 @@ function GridManager.IsAlreadyFlagged(part)
         end
     end
     
-    -- Method 5: Check BillboardGui with flag text
     local billboard = part:FindFirstChildOfClass("BillboardGui")
     if billboard then
         local label = billboard:FindFirstChildOfClass("TextLabel")
@@ -197,7 +183,6 @@ function GridManager.RegisterTile(part)
         existing.probability = nil
         existing.flagged = GridManager.IsAlreadyFlagged(part)
         
-        -- Invalidate neighbor cache
         GridManager.NeighborCache[key] = nil
         return
     end
@@ -221,7 +206,6 @@ function GridManager.RegisterTile(part)
     GridManager.NeighborCache[key] = nil
 end
 
--- KEY OPTIMIZATION: Cached neighbors
 function GridManager.GetNeighbors(tile)
     local key = tile.gridX .. "|" .. tile.gridZ
     
@@ -243,142 +227,8 @@ function GridManager.GetNeighbors(tile)
 end
 
 --------------------------------------------------
--- VISUALS WITH RENDER BUFFER
+-- ADVANCED SOLVER
 --------------------------------------------------
-
-local Visuals = {
-    ActiveMarkers = {},
-    RenderBuffer = {},  -- KEY OPTIMIZATION
-    Best = { ring = nil, text = nil },
-    Status = { text = nil }
-}
-
-function Visuals.CreateMarker(part, color)
-    local square = Drawing.new("Square")
-    square.Color = color
-    square.Thickness = 2
-    square.Filled = true
-    square.Transparency = 0.6
-    square.Visible = true
-    square.ZIndex = 2
-    square.Size = Vector2.new(20, 20)
-    
-    local text = Drawing.new("Text")
-    text.Text = ""
-    text.Color = Color3.new(1, 1, 1)
-    text.Center = true
-    text.Outline = true
-    text.Size = 16
-    text.Visible = false
-    text.ZIndex = 3
-    
-    return {
-        box = square,
-        text = text,
-        storedPos = nil,
-        hasText = false,
-        _lastVisible = false,
-        _lastSX = nil,
-        _lastSY = nil,
-        _lastSize = nil,
-        _lastTextVisible = false
-    }
-end
-
-function Visuals.UpdateMarker(part, color, textContent, cachedPos)
-    local marker = Visuals.ActiveMarkers[part]
-    if not marker then
-        marker = Visuals.CreateMarker(part, color)
-        Visuals.ActiveMarkers[part] = marker
-    end
-    marker.box.Color = color
-    
-    if cachedPos then
-        marker.storedPos = cachedPos
-    end
-    
-    if textContent then
-        marker.text.Text = textContent
-        marker.hasText = true
-    else
-        marker.text.Text = ""
-        marker.hasText = false
-    end
-end
-
-function Visuals.RemoveMarker(part)
-    local marker = Visuals.ActiveMarkers[part]
-    if marker then
-        pcall(function() marker.box:Remove() end)
-        pcall(function() marker.text:Remove() end)
-        Visuals.ActiveMarkers[part] = nil
-    end
-end
-
-function Visuals.InitBestMarker()
-    -- Disabled - removed per user request
-end
-
-function Visuals.InitStatusIndicator()
-    if Visuals.Status.text then return end
-    
-    local txt = Drawing.new("Text")
-    txt.Center = false
-    txt.Outline = true
-    txt.Size = 16
-    txt.Visible = true
-    txt.ZIndex = 20
-    txt.Position = Vector2.new(12, 12)
-    txt.Text = ""
-    txt.Color = Color3.fromRGB(255, 255, 255)
-    
-    Visuals.Status.text = txt
-    Visuals.Status._lastText = nil
-end
-
-function Visuals.ClearAll()
-    for part, marker in pairs(Visuals.ActiveMarkers) do
-        pcall(function() marker.box:Remove() end)
-        pcall(function() marker.text:Remove() end)
-    end
-    Visuals.ActiveMarkers = {}
-    
-    if Visuals.Best.ring then Visuals.Best.ring:Remove() end
-    if Visuals.Best.text then Visuals.Best.text:Remove() end
-    if Visuals.Status.text then Visuals.Status.text:Remove() end
-    
-    Visuals.Best = { ring = nil, text = nil }
-    Visuals.Status = { text = nil }
-end
-
---------------------------------------------------
--- SOLVER WITH QUEUE POOLING
---------------------------------------------------
-
-local Q_POOL, INQ_POOL = {}, {}
-
-local function ClearArray(t)
-    for i = #t, 1, -1 do t[i] = nil end
-end
-
-local function ClearMap(t)
-    for k in pairs(t) do t[k] = nil end
-end
-
-local function AcquireQueues()
-    local q = Q_POOL[#Q_POOL]; Q_POOL[#Q_POOL] = nil
-    local inq = INQ_POOL[#INQ_POOL]; INQ_POOL[#INQ_POOL] = nil
-    if not q then q = {} end
-    if not inq then inq = {} end
-    return q, inq
-end
-
-local function ReleaseQueues(q, inq)
-    ClearArray(q)
-    ClearMap(inq)
-    Q_POOL[#Q_POOL + 1] = q
-    INQ_POOL[#INQ_POOL + 1] = inq
-end
 
 local Solver = {}
 
@@ -396,6 +246,79 @@ function Solver.GetState(tile)
     end
     
     return unknowns, foundMines
+end
+
+-- ADVANCED: Subset-based constraint propagation
+function Solver.RunAdvancedPropagation()
+    local progress = false
+    
+    for _, tile in ipairs(GridManager.Tiles) do
+        if tile.type == "number" and tile.number then
+            local unknowns, found = Solver.GetState(tile)
+            local need = tile.number - found
+            
+            if #unknowns > 0 and need >= 0 then
+                -- Check against all other numbered tiles for subset relationships
+                for _, other in ipairs(GridManager.Tiles) do
+                    if other.type == "number" and other ~= tile and other.number then
+                        local otherUnknowns, otherFound = Solver.GetState(other)
+                        local otherNeed = other.number - otherFound
+                        
+                        if #otherUnknowns > 0 and otherNeed >= 0 then
+                            -- Check if tile's unknowns are a subset of other's unknowns
+                            local unknownSet = {}
+                            for _, u in ipairs(unknowns) do unknownSet[u] = true end
+                            
+                            local isSubset = true
+                            for _, u in ipairs(unknowns) do
+                                local foundInOther = false
+                                for _, ou in ipairs(otherUnknowns) do
+                                    if u == ou then foundInOther = true; break end
+                                end
+                                if not foundInOther then isSubset = false; break end
+                            end
+                            
+                            if isSubset and #unknowns < #otherUnknowns then
+                                -- Calculate difference
+                                local diff = {}
+                                for _, ou in ipairs(otherUnknowns) do
+                                    if not unknownSet[ou] then
+                                        table.insert(diff, ou)
+                                    end
+                                end
+                                
+                                local mineDiff = otherNeed - need
+                                
+                                if mineDiff == 0 and #diff > 0 then
+                                    -- All difference tiles are safe
+                                    for _, dt in ipairs(diff) do
+                                        if dt.predicted ~= "safe" then
+                                            dt.predicted = "safe"
+                                            dt.probability = 0
+                                            dt.confidence = 1.0
+                                            progress = true
+                                        end
+                                    end
+                                elseif mineDiff == #diff and #diff > 0 then
+                                    -- All difference tiles are mines
+                                    for _, dt in ipairs(diff) do
+                                        if dt.predicted ~= "mine" then
+                                            dt.predicted = "mine"
+                                            dt.probability = 1
+                                            dt.confidence = 1.0
+                                            progress = true
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    return progress
 end
 
 function Solver.RunTrivial()
@@ -433,10 +356,8 @@ function Solver.RunTrivial()
     return progress
 end
 
--- Simplified probability calculation for performance
 function Solver.CalculateProbabilities()
     local density = CONFIG.MineDensity
-    local ratio = density / (1 - density)
     
     for _, tile in ipairs(GridManager.Tiles) do
         if tile.type == "unknown" and not tile.predicted then
@@ -467,54 +388,26 @@ function Solver.CalculateProbabilities()
     end
 end
 
-function Solver.PickBestMove()
-    local bestRisk = 2
-    local candidates = {}
-    
-    for _, t in ipairs(GridManager.Tiles) do
-        if t.type == "unknown" and t.predicted ~= "mine" then
-            local r = t.probability or 0.5
-            if t.predicted == "safe" then r = 0 end
-            
-            if r < bestRisk - 1e-9 then
-                bestRisk = r
-                candidates = { t }
-            elseif math.abs(r - bestRisk) <= 1e-9 then
-                candidates[#candidates + 1] = t
-            end
-        end
+function Solver.Solve()
+    -- Run trivial deductions (fast)
+    for i = 1, 10 do
+        if not Solver.RunTrivial() then break end
     end
     
-    if #candidates == 0 then return nil, nil end
-    
-    -- Sort by distance to player
-    local Players = game:GetService("Players")
-    local lp = Players.LocalPlayer
-    if lp and lp.Character then
-        local hrp = lp.Character:FindFirstChild("HumanoidRootPart")
-        if hrp then
-            local refPos = hrp.Position
-            table.sort(candidates, function(a, b)
-                local posA = a.storedPos
-                local posB = b.storedPos
-                if not posA then return false end
-                if not posB then return true end
-                
-                -- Severe uses vector.magnitude() function, not .Magnitude property
-                local vecA = vector.create(posA.X - refPos.X, posA.Y - refPos.Y, posA.Z - refPos.Z)
-                local vecB = vector.create(posB.X - refPos.X, posB.Y - refPos.Y, posB.Z - refPos.Z)
-                local distA = vector.magnitude(vecA)
-                local distB = vector.magnitude(vecB)
-                return distA < distB
-            end)
-        end
+    -- Run advanced propagation
+    for i = 1, 5 do
+        if not Solver.RunAdvancedPropagation() then break end
     end
     
-    return candidates[1], bestRisk
+    -- Run trivial again to catch new deductions
+    Solver.RunTrivial()
+    
+    -- Calculate probabilities for remaining unknowns
+    Solver.CalculateProbabilities()
 end
 
 --------------------------------------------------
--- AUTO-FLAG SYSTEM
+-- AUTO-FLAG
 --------------------------------------------------
 
 local AutoFlag = {}
@@ -524,25 +417,19 @@ function AutoFlag.FlagMine(tile)
         return false 
     end
     
-    -- Check if already flagged
     if tile.flagged or GridManager.IsAlreadyFlagged(tile.part) then
         tile.flagged = true
         return true
     end
     
-    -- FOV AND DISTANCE CHECK
     local camera = workspace.CurrentCamera
     if not camera then return false end
     
     local worldPos = vector.create(tile.storedPos.X, tile.storedPos.Y, tile.storedPos.Z)
     local screenVec, onScreen = camera:WorldToScreenPoint(worldPos)
     
-    -- Only flag if tile is on screen (in FOV)
-    if not onScreen then
-        return false
-    end
+    if not onScreen then return false end
     
-    -- Distance check from CHARACTER (17 studs max flag range)
     local Players = game:GetService("Players")
     local lp = Players.LocalPlayer
     if not lp or not lp.Character then return false end
@@ -556,18 +443,14 @@ function AutoFlag.FlagMine(tile)
     local dz = tile.storedPos.Z - charPos.Z
     local distSq = dx*dx + dy*dy + dz*dz
     
-    -- Only flag tiles within 17 studs
-    if distSq > 289 then  -- 17^2 = 289
+    if distSq > CONFIG.AutoFlag.MaxRange * CONFIG.AutoFlag.MaxRange then
         return false
     end
     
-    local success = false
-    
-    -- METHOD 1: Try ClickDetector (LEFT-CLICK for this game)
+    -- Try ClickDetector
     local clickDetector = tile.part:FindFirstChildOfClass("ClickDetector")
     if clickDetector then
         local ok = pcall(function()
-            -- Distance 0 = left click (for flagging in this game)
             fireclickdetector(clickDetector, 0)
         end)
         if ok then
@@ -579,7 +462,7 @@ function AutoFlag.FlagMine(tile)
         end
     end
     
-    -- METHOD 2: Try ProximityPrompt
+    -- Try ProximityPrompt
     local proximityPrompt = tile.part:FindFirstChildOfClass("ProximityPrompt")
     if proximityPrompt then
         local ok = pcall(function()
@@ -594,16 +477,14 @@ function AutoFlag.FlagMine(tile)
         end
     end
     
-    -- METHOD 3: Try clicking the part directly with mouse1click
+    -- Try direct click
     if screenVec then
         local ok = pcall(function()
-            -- Move mouse to tile and left-click
             local oldPos = getmouseposition()
             mousemoveabs(screenVec.x, screenVec.y)
             task.wait(0.03)
             mouse1click()
             task.wait(0.03)
-            -- Restore mouse position
             mousemoveabs(oldPos.x, oldPos.y)
         end)
         
@@ -622,25 +503,62 @@ end
 function AutoFlag.ProcessFlags()
     if not getgenv().MS_AUTOFLAG then return end
     
-    local flagged = 0
-    
-    -- Try to flag each mine
     for _, tile in ipairs(GridManager.Tiles) do
         if tile.predicted == "mine" and 
            tile.confidence >= CONFIG.AutoFlag.MinConfidence and
            tile.type == "unknown" and
            not tile.flagged then
-            
-            if AutoFlag.FlagMine(tile) then
-                flagged = flagged + 1
-            end
+            AutoFlag.FlagMine(tile)
         end
     end
 end
 
 --------------------------------------------------
--- UPDATE RENDER BUFFER (KEY OPTIMIZATION)
+-- VISUALS (LOGIC SIDE - CREATES/DESTROYS)
 --------------------------------------------------
+
+local Visuals = {
+    ActiveMarkers = {},
+    RenderBuffer = {},
+    Status = { text = nil }
+}
+
+function Visuals.CreateMarker(part, color)
+    local square = Drawing.new("Square")
+    square.Color = color
+    square.Thickness = 2
+    square.Filled = true
+    square.Transparency = 0.6
+    square.Visible = false
+    square.ZIndex = 2
+    square.Size = Vector2.new(20, 20)
+    
+    local text = Drawing.new("Text")
+    text.Text = ""
+    text.Color = Color3.new(1, 1, 1)
+    text.Center = true
+    text.Outline = true
+    text.Size = 16
+    text.Visible = false
+    text.ZIndex = 3
+    
+    return {
+        box = square,
+        text = text,
+        lastVisible = false,
+        lastSX = nil,
+        lastSY = nil
+    }
+end
+
+function Visuals.RemoveMarker(part)
+    local marker = Visuals.ActiveMarkers[part]
+    if marker then
+        pcall(function() marker.box:Remove() end)
+        pcall(function() marker.text:Remove() end)
+        Visuals.ActiveMarkers[part] = nil
+    end
+end
 
 function Visuals.UpdateRenderBuffer()
     local newBuffer = {}
@@ -671,11 +589,16 @@ function Visuals.UpdateRenderBuffer()
             if item then
                 table.insert(newBuffer, item)
                 partsInBuffer[tile.part] = true
+                
+                -- Create marker if doesn't exist (LOGIC SIDE)
+                if not Visuals.ActiveMarkers[item.part] then
+                    Visuals.ActiveMarkers[item.part] = Visuals.CreateMarker(item.part, item.color)
+                end
             end
         end
     end
     
-    -- Remove markers for parts not in buffer (revealed tiles)
+    -- Remove markers for revealed tiles (LOGIC SIDE)
     for part, marker in pairs(Visuals.ActiveMarkers) do
         if not partsInBuffer[part] then
             Visuals.RemoveMarker(part)
@@ -685,93 +608,107 @@ function Visuals.UpdateRenderBuffer()
     Visuals.RenderBuffer = newBuffer
 end
 
+function Visuals.InitStatusIndicator()
+    if Visuals.Status.text then return end
+    
+    local txt = Drawing.new("Text")
+    txt.Center = false
+    txt.Outline = true
+    txt.Size = 16
+    txt.Visible = true
+    txt.ZIndex = 20
+    txt.Position = Vector2.new(12, 12)
+    txt.Text = ""
+    txt.Color = Color3.fromRGB(255, 255, 255)
+    
+    Visuals.Status.text = txt
+    Visuals.Status._lastText = nil
+end
+
 --------------------------------------------------
--- RENDER LOOP
+-- RENDER LOOP (ONLY DRAWS - NO CREATION/LOGIC)
 --------------------------------------------------
 
-function Visuals.Render()
-    local camera = workspace.CurrentCamera
-    if not camera then return end
+local function RenderLoop()
+    Visuals.InitStatusIndicator()
     
-    local camPos = camera.CFrame.Position
-    
-    -- Update status indicator (cheap operation)
-    if Visuals.Status.text then
-        local af = getgenv().MS_AUTOFLAG
-        local newText = af and "AUTO-FLAG: ON (X)" or "AUTO-FLAG: OFF (X)"
-        if newText ~= Visuals.Status._lastText then
-            Visuals.Status.text.Text = newText
-            Visuals.Status.text.Color = af and Color3.fromRGB(60, 255, 60) or Color3.fromRGB(255, 60, 60)
-            Visuals.Status._lastText = newText
-        end
-    end
-    
-    -- Render buffer items (optimized - no table operations)
-    for i = 1, #Visuals.RenderBuffer do
-        local item = Visuals.RenderBuffer[i]
-        local pos = item.pos
-        
-        if pos and item.part and item.part.Parent then
-            -- Fast distance check (no sqrt)
-            local dx = pos.X - camPos.X
-            local dy = pos.Y - camPos.Y
-            local dz = pos.Z - camPos.Z
-            local distSq = dx*dx + dy*dy + dz*dz
+    while getgenv().MS_RUN do
+        local camera = workspace.CurrentCamera
+        if camera then
+            local camPos = camera.CFrame.Position
             
-            if distSq < 1000000 then  -- 1000^2
-                local worldPos = vector.create(pos.X, pos.Y, pos.Z)
-                local screenVec, onScreen = camera:WorldToScreenPoint(worldPos)
-                
-                if onScreen and screenVec then
-                    -- Get or create marker
-                    local marker = Visuals.ActiveMarkers[item.part]
-                    if not marker then
-                        marker = Visuals.CreateMarker(item.part, item.color)
-                        Visuals.ActiveMarkers[item.part] = marker
-                    end
-                    
-                    -- Always update position and visibility
-                    local sx = screenVec.x
-                    local sy = screenVec.y
-                    local dist = math.sqrt(distSq)
-                    if dist < 1 then dist = 1 end
-                    local size = math.min(math.max(800 / dist, 10), 100)
-                    
-                    marker.box.Visible = true
-                    marker.box.Size = Vector2.new(size, size)
-                    marker.box.Position = Vector2.new(sx - size/2, sy - size/2)
-                    marker.box.Color = item.color
-                    
-                    marker.text.Visible = true
-                    marker.text.Position = Vector2.new(sx, sy - 8)
-                    marker.text.Text = item.text
-                    
-                    marker._lastVisible = true
-                    marker._lastSX = sx
-                    marker._lastSY = sy
-                    marker._lastSize = size
-                else
-                    local marker = Visuals.ActiveMarkers[item.part]
-                    if marker and marker._lastVisible then
-                        marker.box.Visible = false
-                        marker.text.Visible = false
-                        marker._lastVisible = false
-                    end
+            -- Update status text
+            if Visuals.Status.text then
+                local af = getgenv().MS_AUTOFLAG
+                local newText = af and "AUTO-FLAG: ON (X)" or "AUTO-FLAG: OFF (X)"
+                if newText ~= Visuals.Status._lastText then
+                    Visuals.Status.text.Text = newText
+                    Visuals.Status.text.Color = af and Color3.fromRGB(60, 255, 60) or Color3.fromRGB(255, 60, 60)
+                    Visuals.Status._lastText = newText
                 end
-            else
-                local marker = Visuals.ActiveMarkers[item.part]
-                if marker and marker._lastVisible then
-                    marker.box.Visible = false
-                    marker.text.Visible = false
-                    marker._lastVisible = false
+            end
+            
+            -- Render markers (ONLY DRAWING - NO CREATION)
+            for i = 1, #Visuals.RenderBuffer do
+                local item = Visuals.RenderBuffer[i]
+                local pos = item.pos
+                
+                if pos and item.part and item.part.Parent then
+                    local marker = Visuals.ActiveMarkers[item.part]
+                    
+                    if marker then  -- Marker must already exist
+                        local dx = pos.X - camPos.X
+                        local dy = pos.Y - camPos.Y
+                        local dz = pos.Z - camPos.Z
+                        local distSq = dx*dx + dy*dy + dz*dz
+                        
+                        if distSq < 1000000 then
+                            local worldPos = vector.create(pos.X, pos.Y, pos.Z)
+                            local screenVec, onScreen = camera:WorldToScreenPoint(worldPos)
+                            
+                            if onScreen and screenVec then
+                                local sx = screenVec.x
+                                local sy = screenVec.y
+                                
+                                if sx ~= marker.lastSX or sy ~= marker.lastSY or not marker.lastVisible then
+                                    local dist = math.sqrt(distSq)
+                                    if dist < 1 then dist = 1 end
+                                    local size = math.min(math.max(800 / dist, 10), 100)
+                                    
+                                    marker.box.Visible = true
+                                    marker.box.Size = Vector2.new(size, size)
+                                    marker.box.Position = Vector2.new(sx - size/2, sy - size/2)
+                                    marker.box.Color = item.color
+                                    
+                                    marker.text.Visible = true
+                                    marker.text.Position = Vector2.new(sx, sy - 8)
+                                    marker.text.Text = item.text
+                                    
+                                    marker.lastVisible = true
+                                    marker.lastSX = sx
+                                    marker.lastSY = sy
+                                end
+                            elseif marker.lastVisible then
+                                marker.box.Visible = false
+                                marker.text.Visible = false
+                                marker.lastVisible = false
+                            end
+                        elseif marker.lastVisible then
+                            marker.box.Visible = false
+                            marker.text.Visible = false
+                            marker.lastVisible = false
+                        end
+                    end
                 end
             end
         end
+        
+        task.wait(CONFIG.Delays.Render)
     end
 end
 
 --------------------------------------------------
--- MAIN LOOPS
+-- LOGIC LOOP (ALL CREATION/DESTRUCTION HERE)
 --------------------------------------------------
 
 local function LogicLoop()
@@ -798,7 +735,6 @@ local function LogicLoop()
                 if #allParts ~= lastPartCount then
                     lastPartCount = #allParts
                     
-                    -- Build current lookup
                     local currentLookup = {}
                     for _, part in ipairs(allParts) do
                         if part.Name == "Part" then
@@ -807,7 +743,6 @@ local function LogicLoop()
                         end
                     end
                     
-                    -- Clean up deleted tiles
                     for i = #GridManager.Tiles, 1, -1 do
                         local tile = GridManager.Tiles[i]
                         if not tile.part or not tile.part.Parent or not currentLookup[tile.part] then
@@ -824,7 +759,6 @@ local function LogicLoop()
                 end
             end
             
-            -- Check for tile state changes
             for _, tile in ipairs(GridManager.Tiles) do
                 local shouldAnalyze = (tile.type == "unknown") or (scanCycle == 1)
                 if shouldAnalyze then
@@ -837,7 +771,6 @@ local function LogicLoop()
                         tile.confidence = 0
                         gridChanged = true
                         
-                        -- Invalidate neighbor caches
                         local key = tile.gridX .. "|" .. tile.gridZ
                         GridManager.NeighborCache[key] = nil
                         for _, offset in ipairs(NEIGHBOR_OFFSETS) do
@@ -846,28 +779,20 @@ local function LogicLoop()
                         end
                     end
                     
-                    -- Update flag status
                     tile.flagged = GridManager.IsAlreadyFlagged(tile.part)
                 end
             end
             
-            -- Solve if grid changed
             if gridChanged then
-                for i = 1, 10 do
-                    if not Solver.RunTrivial() then break end
-                end
-                
-                Solver.CalculateProbabilities()
+                Solver.Solve()
             end
             
-            -- Process auto-flag (throttled to every 0.5 seconds to prevent spam)
             local currentTime = tick()
             if currentTime - lastAutoFlagTime >= 0.5 then
                 lastAutoFlagTime = currentTime
                 AutoFlag.ProcessFlags()
             end
             
-            -- Update render buffer
             Visuals.UpdateRenderBuffer()
         end
         
@@ -875,19 +800,10 @@ local function LogicLoop()
     end
 end
 
-local function RenderLoop()
-    Visuals.InitBestMarker()
-    Visuals.InitStatusIndicator()
-    
-    while getgenv().MS_RUN do
-        Visuals.Render()
-        task.wait(CONFIG.Delays.Render)
-    end
-    
-    Visuals.ClearAll()
-end
+--------------------------------------------------
+-- INPUT LOOP
+--------------------------------------------------
 
--- Input handling for auto-flag toggle
 local function InputLoop()
     print("[Input] Press X to toggle Auto-Flag")
     
@@ -896,21 +812,18 @@ local function InputLoop()
     while getgenv().MS_RUN do
         local isPressed = false
         
-        -- Severe returns STRING keys, not numeric codes!
         local ok, pressedKeys = pcall(function()
             return getpressedkeys()
         end)
         
         if ok and pressedKeys then
             for _, key in ipairs(pressedKeys) do
-                -- Check if key is the string "X" (case insensitive)
                 if type(key) == "string" then
                     if key:upper() == "X" then
                         isPressed = true
                         break
                     end
                 elseif type(key) == "number" then
-                    -- Also check numeric codes just in case
                     if key == 0x58 or key == 88 or key == string.byte("X") then
                         isPressed = true
                         break
@@ -919,23 +832,19 @@ local function InputLoop()
             end
         end
         
-        -- Rising edge detection (key just pressed)
         if isPressed and not wasPressed then
             getgenv().MS_AUTOFLAG = not getgenv().MS_AUTOFLAG
             print(string.format("[Auto-Flag] %s", getgenv().MS_AUTOFLAG and "ON" or "OFF"))
         end
         
         wasPressed = isPressed
-        task.wait(0.05)  -- Poll at 20Hz
+        task.wait(0.05)
     end
 end
 
 --------------------------------------------------
 -- START
 --------------------------------------------------
-
-print("[Severe] Minesweeper Solver Loaded")
-print("[Controls] Press X to toggle Auto-Flag")
 
 task.spawn(LogicLoop)
 task.spawn(RenderLoop)
