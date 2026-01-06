@@ -36,6 +36,30 @@ local CONFIG = {
 
 local NEW_CHECK_TICKS = math.max(1, math.floor(CONFIG.NewCheckInterval / CONFIG.LoopDelay))
 
+-- === PRECOMPUTE PROBABILITY COLORS === --
+local PROB_COLOR = {}
+local PROB_TEXT = {}
+for pct = 0, 100 do
+    local p = pct / 100
+    local hue = 0.33 * (1 - p)  -- Green (0.33) to Red (0)
+    
+    -- Convert HSV to RGB
+    local r, g, b = 0, 0, 0
+    local h = hue * 6
+    local c = 1
+    local x = 1 - math.abs(h % 2 - 1)
+    
+    if h < 1 then r, g, b = c, x, 0
+    elseif h < 2 then r, g, b = x, c, 0
+    elseif h < 3 then r, g, b = 0, c, x
+    elseif h < 4 then r, g, b = 0, x, c
+    elseif h < 5 then r, g, b = x, 0, c
+    else r, g, b = c, 0, x end
+    
+    PROB_COLOR[pct] = Color3.fromRGB(math.floor(r * 255), math.floor(g * 255), math.floor(b * 255))
+    PROB_TEXT[pct] = tostring(pct) .. "%"
+end
+
 -- === DRAWING HELPERS === --
 local markers = {}  -- part -> Drawing
 local statusText = nil
@@ -201,7 +225,150 @@ local function GetNeighbors(t)
     return out
 end
 
--- === SOLVER === --
+-- === SOLVER (MATCHA-LEVEL) === --
+
+-- Object Pools for performance
+local Q_POOL, INQ_POOL = {}, {}
+
+local function ClearArray(t)
+    for i = #t, 1, -1 do t[i] = nil end
+end
+
+local function ClearMap(t)
+    for k in pairs(t) do t[k] = nil end
+end
+
+local function AcquireQueues()
+    local q = Q_POOL[#Q_POOL]; Q_POOL[#Q_POOL] = nil
+    local inq = INQ_POOL[#INQ_POOL]; INQ_POOL[#INQ_POOL] = nil
+    if not q then q = {} end
+    if not inq then inq = {} end
+    return q, inq
+end
+
+local function ReleaseQueues(q, inq)
+    ClearArray(q)
+    ClearMap(inq)
+    Q_POOL[#Q_POOL + 1] = q
+    INQ_POOL[#INQ_POOL + 1] = inq
+end
+
+-- Helper functions for constraint solving
+local function SortAndUniq(vars)
+    table.sort(vars)
+    local out = {}
+    local last = nil
+    for i = 1, #vars do
+        local v = vars[i]
+        if v ~= last then out[#out + 1] = v; last = v end
+    end
+    return out
+end
+
+local function JoinNums(arr)
+    local out = {}
+    for i = 1, #arr do out[i] = tostring(arr[i]) end
+    return table.concat(out, ",")
+end
+
+local function EqKey(eq) 
+    return tostring(eq.needed) .. ":" .. JoinNums(eq.vars) 
+end
+
+local function IsSubset(smaller, bigger)
+    local i, j = 1, 1
+    while i <= #smaller and j <= #bigger do
+        local a, b = smaller[i], bigger[j]
+        if a == b then i=i+1; j=j+1 
+        elseif a > b then j=j+1 
+        else return false end
+    end
+    return i > #smaller
+end
+
+local function DiffVars(bigger, smaller)
+    local out = {}
+    local i, j = 1, 1
+    while i <= #bigger do
+        local b = bigger[i]
+        local s = smaller[j]
+        if s == nil then 
+            out[#out+1]=b; i=i+1 
+        elseif b==s then 
+            i=i+1; j=j+1 
+        elseif b<s then 
+            out[#out+1]=b; i=i+1 
+        else 
+            j=j+1 
+        end
+    end
+    return out
+end
+
+-- Constraint reduction (derives new constraints from existing ones)
+local function ReduceEquations(localEqs)
+    local normalized = {}
+    local byVarSet = {}
+    
+    for _, eq in ipairs(localEqs) do
+        local vars = SortAndUniq(eq.vars)
+        local needed = eq.needed
+        if needed < 0 or needed > #vars then return nil, "contradiction" end
+        
+        local varSetKey = JoinNums(vars)
+        local existing = byVarSet[varSetKey]
+        if existing == nil then
+            byVarSet[varSetKey] = needed
+            normalized[#normalized + 1] = { needed = needed, vars = vars }
+        else
+            if existing ~= needed then return nil, "contradiction" end
+        end
+    end
+    
+    local seen = {}
+    for _, eq in ipairs(normalized) do seen[EqKey(eq)] = true end
+    
+    local HARD_EQ_CAP = 256
+    local changed = true
+    
+    while changed do
+        changed = false
+        for i = 1, #normalized do
+            local A = normalized[i]
+            for j = 1, #normalized do
+                if i ~= j then
+                    local B = normalized[j]
+                    if #A.vars > 0 and #A.vars < #B.vars then
+                        if IsSubset(A.vars, B.vars) then
+                            local diffNeeded = B.needed - A.needed
+                            local diffVars = DiffVars(B.vars, A.vars)
+                            if diffNeeded < 0 or diffNeeded > #diffVars then 
+                                return nil, "contradiction" 
+                            end
+                            if #diffVars == 0 then
+                                if diffNeeded ~= 0 then return nil, "contradiction" end
+                            else
+                                local newEq = { needed = diffNeeded, vars = diffVars }
+                                local k = EqKey(newEq)
+                                if not seen[k] then
+                                    seen[k] = true
+                                    normalized[#normalized + 1] = newEq
+                                    changed = true
+                                    if #normalized > HARD_EQ_CAP then 
+                                        return normalized, "cap_hit" 
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    return normalized, "ok"
+end
+
 local function AnalyzeNeighbors(t)
     local adj = GetNeighbors(t)
     local knownMines = 0
@@ -253,38 +420,327 @@ local function RunTrivialPass()
     return progress
 end
 
-local function CalculateProbabilities()
-    local density = 0.207
+-- MATCHA's advanced Tank solver with constraint propagation
+local function RunTankSolver()
+    local madeProgress = false
+    
+    -- Build constraint system
+    local unknownMap = {}
+    local unknownList = {}
+    local equations = {}
     
     for _, tile in ipairs(tiles) do
-        if tile.type == "unknown" and not tile.predicted then
-            local neighbors = GetNeighbors(tile)
-            local totalProb = 0
-            local count = 0
+        if tile.type == "number" and tile.number then
+            local knownMines, unknowns = AnalyzeNeighbors(tile)
+            local needed = tile.number - knownMines
             
-            for _, n in ipairs(neighbors) do
-                if n.type == "number" and n.number then
-                    local knownMines, unknowns = AnalyzeNeighbors(n)
-                    if #unknowns > 0 then
-                        local need = n.number - knownMines
-                        if need >= 0 then
-                            local prob = need / #unknowns
-                            totalProb = totalProb + prob
-                            count = count + 1
+            if #unknowns > 0 and needed >= 0 then
+                local eqVars = {}
+                for _, uTile in ipairs(unknowns) do
+                    if not unknownMap[uTile] then
+                        table.insert(unknownList, uTile)
+                        unknownMap[uTile] = #unknownList
+                    end
+                    table.insert(eqVars, unknownMap[uTile])
+                end
+                table.insert(equations, { needed = needed, vars = eqVars })
+            end
+        end
+    end
+    
+    if #unknownList == 0 then return false end
+    
+    -- Build var-to-equation index
+    local varToEqIndex = {}
+    for i = 1, #unknownList do varToEqIndex[i] = {} end
+    for eqIdx, eq in ipairs(equations) do
+        for _, varId in ipairs(eq.vars) do
+            table.insert(varToEqIndex[varId], eqIdx)
+        end
+    end
+    
+    -- Find independent clusters
+    local visitedVars = {}
+    local clusters = {}
+    
+    for i = 1, #unknownList do
+        if not visitedVars[i] then
+            local clusterVars = {}
+            local clusterEqs = {}
+            local queue = {i}
+            visitedVars[i] = true
+            local processedEqs = {}
+            local head = 1
+            
+            while head <= #queue do
+                local currVar = queue[head]
+                head = head + 1
+                table.insert(clusterVars, currVar)
+                
+                for _, eqIdx in ipairs(varToEqIndex[currVar]) do
+                    if not processedEqs[eqIdx] then
+                        processedEqs[eqIdx] = true
+                        table.insert(clusterEqs, equations[eqIdx])
+                        
+                        for _, neighborVar in ipairs(equations[eqIdx].vars) do
+                            if not visitedVars[neighborVar] then
+                                visitedVars[neighborVar] = true
+                                table.insert(queue, neighborVar)
+                            end
                         end
                     end
                 end
             end
             
-            if count > 0 then
-                tile.probability = totalProb / count
-                tile.confidence = math.min(count / 3, 1.0)
-            else
-                tile.probability = density
-                tile.confidence = 0.1
+            table.insert(clusters, { vars = clusterVars, eqs = clusterEqs })
+        end
+    end
+    
+    -- Weight table for density-based probability
+    local density = 0.207
+    local ratio = density / (1 - density)
+    local weightTable = {}
+    for k = 0, 50 do
+        weightTable[k] = math.pow(ratio, k)
+    end
+    
+    -- Solve each cluster
+    for _, cluster in ipairs(clusters) do
+        if #cluster.vars <= 16 then
+            -- Order vars by degree (heuristic for faster solving)
+            local orderedVars = {}
+            for i = 1, #cluster.vars do orderedVars[i] = cluster.vars[i] end
+            
+            local degree = {}
+            for i = 1, #orderedVars do degree[orderedVars[i]] = 0 end
+            for _, eq in ipairs(cluster.eqs) do
+                for _, globId in ipairs(eq.vars) do
+                    if degree[globId] ~= nil then 
+                        degree[globId] = degree[globId] + 1 
+                    end
+                end
+            end
+            
+            table.sort(orderedVars, function(a, b) 
+                return (degree[a] or 0) > (degree[b] or 0) 
+            end)
+            
+            local globalToLocal = {}
+            local localToGlobal = {}
+            for locIdx, globId in ipairs(orderedVars) do
+                globalToLocal[globId] = locIdx
+                localToGlobal[locIdx] = globId
+            end
+            
+            local nVars = #orderedVars
+            local localEqs = {}
+            for _, eq in ipairs(cluster.eqs) do
+                local vars = {}
+                for _, globId in ipairs(eq.vars) do 
+                    vars[#vars + 1] = globalToLocal[globId] 
+                end
+                localEqs[#localEqs + 1] = { needed = eq.needed, vars = vars }
+            end
+            
+            -- Reduce equations (derive new constraints)
+            local reduceStatus
+            localEqs, reduceStatus = ReduceEquations(localEqs)
+            
+            if localEqs then
+                local varToEqs = {}
+                for v = 1, nVars do varToEqs[v] = {} end
+                for eqIdx, eq in ipairs(localEqs) do
+                    for _, v in ipairs(eq.vars) do 
+                        varToEqs[v][#varToEqs[v] + 1] = eqIdx 
+                    end
+                end
+                
+                local varDegree = {}
+                for v = 1, nVars do varDegree[v] = #varToEqs[v] end
+                
+                local assignment = {}
+                local eqMines = {}
+                local eqUnk = {}
+                for eqIdx, eq in ipairs(localEqs) do
+                    eqMines[eqIdx] = 0
+                    eqUnk[eqIdx] = #eq.vars
+                end
+                
+                -- Track solutions
+                local solutionHits = {}
+                for v=1, nVars do solutionHits[v] = {} end
+                local totalWeightLocal = 0
+                
+                local function EnqueueEq(q, inQueue, eqIdx)
+                    if not inQueue[eqIdx] then 
+                        inQueue[eqIdx] = true
+                        q[#q + 1] = eqIdx 
+                    end
+                end
+                
+                local function AssignVar(v, val, trail, q, inQueue)
+                    if assignment[v] ~= nil then 
+                        return assignment[v] == val 
+                    end
+                    assignment[v] = val
+                    trail[#trail + 1] = { v = v, val = val }
+                    for _, eqIdx in ipairs(varToEqs[v]) do
+                        eqUnk[eqIdx] = eqUnk[eqIdx] - 1
+                        eqMines[eqIdx] = eqMines[eqIdx] + val
+                        EnqueueEq(q, inQueue, eqIdx)
+                    end
+                    return true
+                end
+                
+                local function UndoTo(trail, targetSize)
+                    while #trail > targetSize do
+                        local rec = trail[#trail]
+                        trail[#trail] = nil
+                        local v, val = rec.v, rec.val
+                        assignment[v] = nil
+                        for _, eqIdx in ipairs(varToEqs[v]) do
+                            eqUnk[eqIdx] = eqUnk[eqIdx] + 1
+                            eqMines[eqIdx] = eqMines[eqIdx] - val
+                        end
+                    end
+                end
+                
+                local function Propagate(trail, q, inQueue)
+                    local head = 1
+                    while head <= #q do
+                        local eqIdx = q[head]
+                        head = head + 1
+                        inQueue[eqIdx] = false
+                        local eq = localEqs[eqIdx]
+                        local need = eq.needed
+                        local mines = eqMines[eqIdx]
+                        local unk = eqUnk[eqIdx]
+                        
+                        if mines > need then return false end
+                        if mines + unk < need then return false end
+                        
+                        if unk > 0 then
+                            if mines == need then
+                                for _, v in ipairs(eq.vars) do
+                                    if assignment[v] == nil then 
+                                        if not AssignVar(v, 0, trail, q, inQueue) then 
+                                            return false 
+                                        end 
+                                    end
+                                end
+                            elseif mines + unk == need then
+                                for _, v in ipairs(eq.vars) do
+                                    if assignment[v] == nil then 
+                                        if not AssignVar(v, 1, trail, q, inQueue) then 
+                                            return false 
+                                        end 
+                                    end
+                                end
+                            end
+                        else
+                            if mines ~= need then return false end
+                        end
+                    end
+                    return true
+                end
+                
+                local function PickNextVar()
+                    local bestV, bestScore = nil, -1
+                    for v = 1, nVars do
+                        if assignment[v] == nil then
+                            local score = varDegree[v]
+                            if score > bestScore then 
+                                bestScore = score
+                                bestV = v 
+                            end
+                        end
+                    end
+                    return bestV
+                end
+                
+                local function Backtrack(trail)
+                    local v = PickNextVar()
+                    if not v then
+                        -- Found a solution
+                        local m = 0
+                        for i = 1, nVars do 
+                            if assignment[i] == 1 then m = m + 1 end 
+                        end
+                        
+                        -- Weight by mine density
+                        local w = weightTable[m] or 1
+                        totalWeightLocal = totalWeightLocal + w
+                        
+                        for i = 1, nVars do
+                            if assignment[i] == 1 then
+                                solutionHits[i][m] = (solutionHits[i][m] or 0) + 1
+                            end
+                        end
+                        return
+                    end
+                    
+                    do
+                        local saved = #trail
+                        local q, inQueue = AcquireQueues()
+                        if AssignVar(v, 0, trail, q, inQueue) and 
+                           Propagate(trail, q, inQueue) then 
+                            Backtrack(trail) 
+                        end
+                        ReleaseQueues(q, inQueue)
+                        UndoTo(trail, saved)
+                    end
+                    
+                    do
+                        local saved = #trail
+                        local q, inQueue = AcquireQueues()
+                        if AssignVar(v, 1, trail, q, inQueue) and 
+                           Propagate(trail, q, inQueue) then 
+                            Backtrack(trail) 
+                        end
+                        ReleaseQueues(q, inQueue)
+                        UndoTo(trail, saved)
+                    end
+                end
+                
+                -- Run backtracking solver
+                local trail, q, inQueue = {}, {}, {}
+                for eqIdx = 1, #localEqs do EnqueueEq(q, inQueue, eqIdx) end
+                if Propagate(trail, q, inQueue) then Backtrack(trail) end
+                
+                -- Calculate weighted probabilities
+                if totalWeightLocal > 0 then
+                    for locIdx, globId in ipairs(orderedVars) do
+                        local tile = unknownList[globId]
+                        
+                        local weightedHits = 0
+                        local hitsMap = solutionHits[locIdx]
+                        
+                        for m, count in pairs(hitsMap) do
+                            local w = weightTable[m] or 1
+                            weightedHits = weightedHits + (count * w)
+                        end
+                        
+                        local prob = weightedHits / totalWeightLocal
+                        
+                        if prob < 0 then prob = 0 end
+                        if prob > 1 then prob = 1 end
+                        
+                        tile.probability = prob
+                        
+                        if prob < 1e-6 and tile.predicted ~= "safe" then
+                            tile.predicted = "safe"
+                            madeProgress = true
+                        elseif prob > 1 - 1e-6 and tile.predicted ~= "mine" then
+                            tile.predicted = "mine"
+                            madeProgress = true
+                        end
+                    end
+                end
             end
         end
     end
+    
+    return madeProgress
 end
 
 local function SolveAll()
@@ -293,19 +749,21 @@ local function SolveAll()
         if tile.type == "unknown" then
             tile.predicted = false
             tile.probability = nil
-            tile.confidence = 0
         end
     end
     
-    -- Run trivial solver until no progress
-    for i = 1, 20 do
+    -- Run trivial solver multiple times
+    for i = 1, 10 do
         if not RunTrivialPass() then
             break
         end
     end
     
-    -- Calculate probabilities
-    CalculateProbabilities()
+    -- Run advanced constraint solver
+    if RunTankSolver() then
+        -- One more trivial pass after Tank
+        RunTrivialPass()
+    end
 end
 
 -- === AUTO-FLAG === --
@@ -610,31 +1068,103 @@ while getgenv().MS_RUN do
             if newType ~= t.type or newNumber ~= t.number then
                 t.type = newType
                 t.number = newNumber
-                t.predicted = false
-                RemoveMarker(t.part)
                 changed = true
             end
         end
     end
     
-    -- Re-solve if changed
+    -- ALWAYS re-solve (not just when changed)
+    -- This ensures predictions are always current
     if changed then
+        -- Full solve when grid changes
         SolveAll()
     end
     
-    -- Update markers
+    -- ALWAYS update markers every loop (not just when changed)
+    -- Use CHANGE DETECTION - only update if marker state changed
+    local updatesThisFrame = 0
+    local maxUpdates = 20  -- Even more conservative
+    
     for _, t in ipairs(tiles) do
-        if t.predicted == "mine" and t.type ~= "mine" then
-            local isFlagged = IsAlreadyFlagged(t.part)
-            if isFlagged then
-                SetMarker(t.part, "M✓", Color3.fromRGB(128, 128, 128))
-            else
-                SetMarker(t.part, "M", Color3.fromRGB(255, 40, 40))
+        if updatesThisFrame >= maxUpdates then
+            break
+        end
+        
+        -- Calculate what the marker SHOULD be
+        local shouldShow = false
+        local markerText = nil
+        local markerColor = nil
+        
+        if t.type == "unknown" then
+            if t.predicted == "mine" then
+                -- Check if flagged (but don't check every frame - use tile cache)
+                if not t._lastFlagCheck or (tick() - t._lastFlagCheck) > 0.5 then
+                    t._isFlagged = IsAlreadyFlagged(t.part)
+                    t._lastFlagCheck = tick()
+                end
+                
+                if not t._isFlagged then
+                    shouldShow = true
+                    markerText = "M"
+                    markerColor = Color3.fromRGB(255, 40, 40)
+                end
+            elseif t.predicted == "safe" then
+                if not t._lastFlagCheck or (tick() - t._lastFlagCheck) > 0.5 then
+                    t._isFlagged = IsAlreadyFlagged(t.part)
+                    t._lastFlagCheck = tick()
+                end
+                
+                shouldShow = true
+                if t._isFlagged then
+                    markerText = "S!"
+                    markerColor = Color3.fromRGB(255, 165, 0)
+                else
+                    markerText = "S"
+                    markerColor = Color3.fromRGB(50, 255, 50)
+                end
+            elseif t.probability and t.probability > 0.01 and t.probability < 0.99 then
+                -- Cache neighbor check
+                if t._hasRevealedNeighbor == nil then
+                    t._hasRevealedNeighbor = false
+                    local neighbors = GetNeighbors(t)
+                    for _, n in ipairs(neighbors) do
+                        if n.type == "number" or n.type == "empty" then
+                            t._hasRevealedNeighbor = true
+                            break
+                        end
+                    end
+                end
+                
+                if t._hasRevealedNeighbor then
+                    if not t._lastFlagCheck or (tick() - t._lastFlagCheck) > 0.5 then
+                        t._isFlagged = IsAlreadyFlagged(t.part)
+                        t._lastFlagCheck = tick()
+                    end
+                    
+                    if not t._isFlagged then
+                        shouldShow = true
+                        local pct = math.floor(t.probability * 100 + 0.5)
+                        if pct <= 0 then pct = 1 end
+                        if pct >= 100 then pct = 99 end
+                        markerText = PROB_TEXT[pct]
+                        markerColor = PROB_COLOR[pct]
+                    end
+                end
             end
-        elseif t.predicted == "safe" and t.type == "unknown" then
-            SetMarker(t.part, "S", Color3.fromRGB(50, 255, 50))
-        else
-            RemoveMarker(t.part)
+        end
+        
+        -- Build state key for change detection
+        local stateKey = shouldShow and (markerText .. "|" .. tostring(markerColor)) or "NONE"
+        
+        -- Only update if state changed
+        if t._lastMarkerState ~= stateKey then
+            if shouldShow then
+                SetMarker(t.part, markerText, markerColor)
+            else
+                RemoveMarker(t.part)
+            end
+            t._lastMarkerState = stateKey
+            updatesThisFrame = updatesThisFrame + 1
         end
     end
     
