@@ -70,32 +70,45 @@ local function getBall()
 end
 local function isEnemy(player)
     local mt=lp.Team; local pt=player.Team
-    if not mt or not pt then return true end
+    if not mt or not pt then return false end  -- no team = not an enemy (lobby)
     return mt ~= pt
 end
 
 -- ============================================================
 -- Hoops / target
 -- ============================================================
-local HOOPS={
-    away={x=-146.81893920898438,y=17.0,z=-297.1175537109375},
-    home={x= 146.3433074951172, y=17.0,z=-297.5804443359375},
-}
-local function hoopForTeam(n)
-    n=string.lower(n or "")
-    if n=="home" then return HOOPS.away
-    elseif n=="away" or n=="visitor" then return HOOPS.home end
+-- Dynamic hoop detection from Workspace.Hoops
+local function getHoopPos(side)
+    -- side = "Away" or "Home"
+    local ok, hoop = pcall(function()
+        return ws.Hoops:FindFirstChild(side):FindFirstChild("Hoop")
+    end)
+    if ok and hoop then
+        local pos = hoop.Position
+        return {x=pos.X, y=pos.Y + 0.5, z=pos.Z}  -- +0.5 to aim just above rim center
+    end
     return nil
 end
-local TARGET=HOOPS.away; local lastTeamName=""
+
+local TARGET=nil; local lastTeamName=""
 local function updateTarget()
     local tn=lp.Team and lp.Team.Name or ""
     if tn==lastTeamName then return end
-    local h=hoopForTeam(tn)
-    if h then TARGET=h; lastTeamName=tn end
+    local side
+    if string.lower(tn)=="home" then side="Away"
+    elseif string.lower(tn)=="away" or string.lower(tn)=="visitor" then side="Home"
+    end
+    if side then
+        local h = getHoopPos(side)
+        if h then
+            TARGET=h; lastTeamName=tn
+            print(string.format("[AutoGoal] Team '%s' -> %s hoop (%.2f,%.2f,%.2f)", tn, side, h.x, h.y, h.z))
+        end
+    end
 end
 task.spawn(function()
     repeat wait(0.1) until lp.Team
+    -- Initial target fetch
     while running do updateTarget(); wait(TEAM_POLL) end
 end)
 
@@ -139,6 +152,8 @@ for i=1,FOV_SEGMENTS do
     local l=Drawing.new("Line"); l.Visible=false; l.Color=Color3.fromRGB(0,255,0); l.Thickness=2
     fovLines[i]=l
 end
+local fovCircle=Drawing.new("Circle"); fovCircle.Visible=false; fovCircle.Filled=false
+fovCircle.Color=Color3.fromRGB(0,255,0); fovCircle.Thickness=2; fovCircle.NumSides=64
 local stealWarn=Drawing.new("Text"); stealWarn.Visible=false; stealWarn.Size=16
 stealWarn.Center=true; stealWarn.Color=Color3.fromRGB(255,60,60); stealWarn.Outline=true
 
@@ -155,6 +170,8 @@ for i=1,FOV_SEGMENTS do
     local l=Drawing.new("Line"); l.Visible=false; l.Color=Color3.fromRGB(0,180,255); l.Thickness=1
     dribLines[i]=l
 end
+local dribCircle=Drawing.new("Circle"); dribCircle.Visible=false; dribCircle.Filled=false
+dribCircle.Color=Color3.fromRGB(0,180,255); dribCircle.Thickness=1; dribCircle.NumSides=64
 
 local function speedColor(s)
     if s>60 then return Color3.fromRGB(255,0,0) end
@@ -195,18 +212,15 @@ local function pressQ(playerName)
     local now = tick()
     if now - lastQPress < AUTO_Q_COOLDOWN then return end
     lastQPress = now
-    keypress(AUTO_Q_KEY)  -- press FIRST, before anything else
+    keypress(AUTO_Q_KEY)
     task.spawn(function()
         task.wait(0.08)
         keyrelease(AUTO_Q_KEY)
-    end)
-    -- Everything else async so it doesn't delay the keypress
-    task.spawn(function()
+        -- Visual + notify AFTER key is released
         for _,l in ipairs(dribLines) do l.Color=Color3.fromRGB(255,200,0) end
         task.wait(0.4)
         for _,l in ipairs(dribLines) do l.Color=Color3.fromRGB(0,180,255) end
     end)
-    notify("caught "..(playerName or "em").." lackin", "AUTO DRIBBLE", 1)
 end
 
 -- ============================================================
@@ -214,6 +228,7 @@ end
 -- ============================================================
 local lastScoreTime=0
 local function doArc(ball)
+    if not TARGET then return end
     local tx,ty,tz=TARGET.x,TARGET.y,TARGET.z
     local collider=ball:FindFirstChild("Collider")
     local cb=getMemBase(ball); local cc=collider and getMemBase(collider)
@@ -264,7 +279,7 @@ task.spawn(function()
                     local holdDur=m1HoldStart and (tick()-m1HoldStart) or 0
                     if not inFlight and delta>TRIGGER_DELTA and by>MIN_SHOT_HEIGHT
                         and (tick()-lastScoreTime)>SCORE_COOLDOWN and holdDur>=M1_HOLD_MIN then
-                        local d=math.sqrt((TARGET.x-bx)^2+(TARGET.y-by)^2+(TARGET.z-bz)^2)
+                        local d=TARGET and math.sqrt((TARGET.x-bx)^2+(TARGET.y-by)^2+(TARGET.z-bz)^2) or 0
                         if d>5 then
                             inFlight=true
                             task.spawn(function() doArc(ball); inFlight=false end)
@@ -284,35 +299,60 @@ end)
 local w={}
 
 UI.AddTab("Auto Hoop", function(tab)
-    local aim=tab:Section("Aimbot","Left")
-    w.auto_goal    = aim:Toggle("auto_goal",   "Auto Goal",     false)
-    aim:Spacing()
-    w.auto_block    = aim:Toggle("auto_block",   "Auto Block",   false)
-    w.block_tc      = aim:Toggle("block_tc",     "Team Check",   false)
-    aim:Tip("Only blocks when an enemy is also inside the FOV ring")
-    w.fov_radius    = aim:SliderInt("fov_radius", "FOV Radius",  5, 60, 15)
-    aim:Spacing()
-    w.auto_dribble = aim:Toggle("auto_dribble","Auto Dribble",  false)
-    aim:Tip("Presses Q when enemy speed spikes — catches steal attempts")
-    w.dribble_fov  = aim:SliderInt("dribble_fov","Radius",  5, 50,  30)
 
-    local queue=tab:Section("Queue","Left")
-    w.position=queue:Combo("position","Position",POSITIONS,0,function(_,text) selectedPos=text end)
-    queue:Button("Queue (F2)",function() doQueue() end)
+    -- ── Main: core features ──────────────────────────────────
+    local main = tab:Section("Main", "Left")
+    w.auto_goal    = main:Toggle("auto_goal",    "Auto Goal",    false)
+    main:Tip("Hold M1 for 0.7s then shoot — guides ball into enemy hoop")
+    main:Spacing()
+    w.auto_block   = main:Toggle("auto_block",   "Auto Block",   false)
+    w.block_tc     = main:Toggle("block_tc",     "Team Check",   false)
+    main:Tip("Only blocks when enemy is inside FOV ring")
+    w.fov_radius   = main:SliderInt("fov_radius","Block Radius", 5, 60, 15)
+    main:Spacing()
+    w.auto_dribble = main:Toggle("auto_dribble", "Auto Dribble", false)
+    main:Tip("Presses Q when enemy speed spikes inside dribble ring")
+    w.dribble_fov  = main:SliderInt("dribble_fov","Dribble Radius", 5, 50, 30)
 
-    local vis=tab:Section("Visuals","Right")
-    w.ball_esp   = vis:Toggle("ball_esp",  "Ball ESP",    false)
-    w.ball_col   = vis:ColorPicker("ball_col", 1,0.65,0,1)
+    -- ── Misc: queue ──────────────────────────────────────────
+    local misc = tab:Section("Misc", "Left")
+    w.position = misc:Combo("position","Position",POSITIONS,0,function(_,text) selectedPos=text end)
+    misc:Button("Queue (F2)", function() doQueue() end)
+
+    -- ── Visuals: ESP ─────────────────────────────────────────
+    local vis = tab:Section("Visuals", "Right")
+    w.ball_esp    = vis:Toggle("ball_esp",   "Ball ESP",     false)
+    w.ball_col    = vis:ColorPicker("ball_col", 1,0.65,0,1)
     vis:Spacing()
-    w.plr_esp    = vis:Toggle("plr_esp",   "Player ESP",  false)
-    w.plr_boxes  = vis:Toggle("plr_boxes", "Boxes",       false)
-    w.plr_box_col= vis:ColorPicker("plr_box_col",1,1,1,1)
-    w.plr_tracer = vis:Toggle("plr_tracer","Tracers",     false)
-    w.plr_name   = vis:Toggle("plr_name",  "Names",       false)
-    w.plr_speed  = vis:Toggle("plr_speed", "Speed",       false)
-    w.plr_tc     = vis:Toggle("plr_tc",    "Team Check",  false)
+    w.plr_esp     = vis:Toggle("plr_esp",    "Player ESP",   false)
+    w.plr_boxes   = vis:Toggle("plr_boxes",  "Boxes",        false)
+    w.plr_box_col = vis:ColorPicker("plr_box_col", 1,1,1,1)
+    w.plr_tracer  = vis:Toggle("plr_tracer", "Tracers",      false)
+    w.plr_name    = vis:Toggle("plr_name",   "Names",        false)
+    w.plr_speed   = vis:Toggle("plr_speed",  "Speed",        false)
+    w.plr_tc      = vis:Toggle("plr_tc",     "Team Check",   false)
     vis:Tip("Hides teammates from ESP")
-    w.plr_dist   = vis:SliderInt("plr_dist","Max Distance",10,500,200)
+    w.plr_dist    = vis:SliderInt("plr_dist","Max Distance", 10, 500, 200)
+    vis:Spacing()
+    w.esp_font    = vis:Combo("esp_font","Font",{"UI","System","SystemBold","Minecraft","Monospace","Pixel","Fortnite"},0)
+    w.esp_scale   = vis:SliderInt("esp_scale","Text Size",8,32,14)
+    vis:Spacing()
+    w.rainbow     = vis:Toggle("rainbow","Rainbow Mode", false)
+    vis:Tip("Cycles hue across rings, ESP text and tracers")
+
+    -- ── Visuals: FOV rings ────────────────────────────────────
+    local fovvis = tab:Section("FOV Style", "Right")
+    w.show_circles  = fovvis:Toggle("show_circles", "Show FOV Circles", true)
+    fovvis:Spacing()
+    w.fov_style     = fovvis:Combo("fov_style",  "Block Style",   {"Solid","Dashed","Dotted","Dotted Animated","Circle"}, 0)
+    w.fov_thick     = fovvis:SliderInt("fov_thick",  "Block Thickness", 1, 8, 2)
+    w.fov_color_tog = fovvis:Toggle("fov_color_tog", "Block Color",   true)
+    w.fov_color     = fovvis:ColorPicker("fov_color", 0,1,0,1)
+    fovvis:Spacing()
+    w.drib_style    = fovvis:Combo("drib_style", "Dribble Style", {"Solid","Dashed","Dotted","Dotted Animated","Circle"}, 1)
+    w.drib_thick    = fovvis:SliderInt("drib_thick", "Dribble Thickness", 1, 8, 1)
+    w.drib_color_tog= fovvis:Toggle("drib_color_tog","Dribble Color", true)
+    w.drib_color    = fovvis:ColorPicker("drib_color", 0,0.7,1,1)
 end)
 
 UI.SetValue("fov_radius",   15)
@@ -321,6 +361,14 @@ UI.SetValue("auto_block",   false)
 UI.SetValue("block_tc",     false)
 UI.SetValue("auto_dribble", false)
 UI.SetValue("dribble_fov",  30)
+UI.SetValue("show_circles", true)
+UI.SetValue("fov_style",    0)
+UI.SetValue("drib_style",   1)
+UI.SetValue("fov_thick",    2)
+UI.SetValue("drib_thick",   1)
+UI.SetValue("esp_font",     0)
+UI.SetValue("esp_scale",    14)
+UI.SetValue("rainbow",      false)
 UI.SetValue("ball_esp",     false)
 UI.SetValue("plr_esp",      false)
 UI.SetValue("plr_boxes",    false)
@@ -332,6 +380,34 @@ UI.SetValue("plr_tc",       false)
 local function get(id)
     local ok, v = pcall(function() return UI.GetValue(id) end)
     return ok and v or false
+end
+local FONTS = {
+    [0] = Drawing.Fonts.UI,
+    [1] = Drawing.Fonts.System,
+    [2] = Drawing.Fonts.SystemBold,
+    [3] = Drawing.Fonts.Minecraft,
+    [4] = Drawing.Fonts.Monospace,
+    [5] = Drawing.Fonts.Pixel,
+    [6] = Drawing.Fonts.Fortnite,
+}
+local function getFont()
+    local idx = get("esp_font") or 0
+    return FONTS[idx] or Drawing.Fonts.UI
+end
+local rainbowHue = 0
+local function rainbowColor(offset)
+    offset = offset or 0
+    local h = ((rainbowHue or 0) + offset) % 1
+    local r,g,b
+    local i = math.floor(h*6); local f = h*6-i
+    local q = 1-f
+    if i%6==0 then r,g,b=1,f,0
+    elseif i%6==1 then r,g,b=q,1,0
+    elseif i%6==2 then r,g,b=0,1,f
+    elseif i%6==3 then r,g,b=0,q,1
+    elseif i%6==4 then r,g,b=f,0,1
+    else r,g,b=1,0,q end
+    return Color3.new(r,g,b)
 end
 local function getColor(id)
     local ok, r, g, b, a = pcall(function() return UI.GetValue(id) end)
@@ -358,7 +434,7 @@ local function getOrCreateSlot(name)
     box.Visible=false; box.Filled=false; box.Thickness=1; box.Color=Color3.fromRGB(255,255,255)
     local name_lbl = Drawing.new("Text")
     name_lbl.Visible=false; name_lbl.Size=14; name_lbl.Center=true; name_lbl.Outline=true
-    name_lbl.Color=Color3.fromRGB(255,255,255)
+    name_lbl.Color=Color3.fromRGB(255,255,255); name_lbl.Font=Drawing.Fonts.UI
     local tracer = Drawing.new("Line")
     tracer.Visible=false; tracer.Thickness=1; tracer.Color=Color3.fromRGB(255,255,255)
     espObjects[name] = {name_lbl=name_lbl, tracer=tracer, box=box, corners=corners}
@@ -431,11 +507,11 @@ task.spawn(function()
                     local cd = math.max(1, math.sqrt((bpos.X-cp.X)^2+(bpos.Y-cp.Y)^2+(bpos.Z-cp.Z)^2))
                     local bs = math.max(8, math.min(60, 3000/cd))
                     local hf = bs/2
-                    local col = getColor("ball_col")
+                    local col = get("rainbow") and rainbowColor(0.66) or getColor("ball_col")
                     local vp  = camera.ViewportSize
                     ballBox.Color=col; ballBox.Position=Vector2.new(sp.X-hf,sp.Y-hf)
                     ballBox.Size=Vector2.new(bs,bs); ballBox.Visible=true
-                    ballLabel.Text=dist.."m"; ballLabel.Color=Color3.fromRGB(255,255,255)
+                    ballLabel.Size=get("esp_scale") or 14; ballLabel.Text=dist.."m"; ballLabel.Color=get("rainbow") and rainbowColor(0.66) or Color3.fromRGB(255,255,255)
                     ballLabel.Position=Vector2.new(sp.X,sp.Y-hf-16); ballLabel.Visible=true
                     if get("plr_tracer") then
                         ballTracer.Color=col; ballTracer.From=Vector2.new(vp.X/2,vp.Y)
@@ -487,21 +563,26 @@ task.spawn(function()
                 local dt = now - ld.time
                 local ddx, ddz = x-ld.x, z-ld.z
                 rawSpeed = math.sqrt(ddx*ddx+ddz*ddz) / dt
-                speed = ld.speed + (rawSpeed - ld.speed) * 0.25
+                speed = (ld.speed or 0) + (rawSpeed - (ld.speed or 0)) * 0.25
             elseif ld then
-                speed = ld.speed
+                speed = ld.speed or 0
             end
             espData[pname] = {x=x,y=y,z=z,time=now,speed=speed}
 
-            -- Auto dribble avg update only here (detection in dedicated loop)
-            if isEnemy(player) then
-                if not dribData[pname] then
-                    dribData[pname] = {avg=rawSpeed, samples=1, lastFired=0, prevDist=0}
-                end
-                local dd = dribData[pname]
-                if rawSpeed > 1 then
-                    dd.samples = dd.samples + 1
-                    dd.avg = dd.avg + (rawSpeed - dd.avg) * 0.15
+            -- Auto dribble avg update — never track self
+            if player == lp then dribData[pname]=nil end
+            if isEnemy(player) and myX and player ~= lp then
+                local dribR3 = get("dribble_fov") or 30
+                local pdist = math.sqrt((myX-x)^2+(myZ-z)^2)
+                if pdist <= dribR3 then
+                    if not dribData[pname] then
+                        dribData[pname] = {avg=rawSpeed, samples=1, lastFired=0, prevDist=pdist}
+                    end
+                    local dd = dribData[pname]
+                    if rawSpeed > 1 then
+                        dd.samples = dd.samples + 1
+                        dd.avg = dd.avg + (rawSpeed - dd.avg) * 0.15
+                    end
                 end
             end
 
@@ -519,7 +600,7 @@ task.spawn(function()
             -- Bottom of box for tracer
             local spBot, onBot = WorldToScreen(Vector3.new(x, y-3, z))
 
-            local col = speedColor(speed)
+            local col = get("rainbow") and rainbowColor(speed/200) or speedColor(speed)
 
             if nameOn or speedOn then
                 local parts = {}
@@ -527,6 +608,8 @@ task.spawn(function()
                 if speedOn then parts[#parts+1] = string.format("[%.0f]", speed) end
                 slot.name_lbl.Text     = table.concat(parts,"  ")
                 slot.name_lbl.Color    = col
+                slot.name_lbl.Font     = getFont()
+                slot.name_lbl.Size     = get("esp_scale") or 14
                 slot.name_lbl.Position = Vector2.new(sp.X, sp.Y-20)
                 slot.name_lbl.Visible  = true
             else slot.name_lbl.Visible=false end
@@ -545,8 +628,9 @@ task.spawn(function()
                     local bw  = bh*0.55
                     local bxp = sp.X - bw/2
                     slot.box.Position=Vector2.new(bxp,sp.Y); slot.box.Size=Vector2.new(bw,bh)
-                    slot.box.Color=boxCol; slot.box.Visible=true
-                    drawESPCorners(slot.corners,bxp,sp.Y,bw,bh,boxCol)
+                    local bCol = get("rainbow") and rainbowColor(0.1) or boxCol
+                    slot.box.Color=bCol; slot.box.Visible=true
+                    drawESPCorners(slot.corners,bxp,sp.Y,bw,bh,bCol)
                 else
                     slot.box.Visible=false
                     for _,l in ipairs(slot.corners) do l.Visible=false end
@@ -572,73 +656,135 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- Auto Dribble — dedicated fast loop (no print, no logging)
+-- Auto Dribble — relative velocity + interception detection
 -- ============================================================
+local lastMyX, lastMyZ, lastMyTime = nil, nil, nil
+
 task.spawn(function()
     while running do
-        if get("auto_dribble") then
-            local now = tick()
-            local myHRP2 = getHRP()
-            local myX2, myZ2
-            if myHRP2 then
-                local mx,my,mz = readPosInst(myHRP2)
-                if mx then myX2=mx; myZ2=mz end
-            end
-            local dribR2 = get("dribble_fov") or 30
+        local now = tick()
+        local dribOn = get("auto_dribble")
+        local dribR2 = get("dribble_fov") or 30
 
-            if myX2 then
-                for _, player in ipairs(players:GetPlayers()) do
-                    if player == lp then continue end
-                    if not isEnemy(player) then continue end
-                    local char = player.Character
-                    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-                    if not hrp then continue end
-                    local x,y,z = readPosInst(hrp)
-                    if not x then continue end
-
-                    local pname = player.Name
-                    local dd = dribData[pname]
-                    if not dd then continue end
-
-                    local dist = math.sqrt((myX2-x)^2+(myZ2-z)^2)
-                    if dist > dribR2 then dd.prevDist=dist; continue end
-
-                    -- Compute raw speed from dd's last known position
-                    local dt = now - (dd.lastTime or now)
-                    local rawSpeed2 = 0
-                    if dt > 0 and dd.lastX then
-                        local ddx = x - dd.lastX
-                        local ddz = z - dd.lastZ
-                        rawSpeed2 = math.sqrt(ddx*ddx+ddz*ddz) / dt
-                    end
-                    dd.lastX=x; dd.lastZ=z; dd.lastTime=now
-
-                    local playerAvg = dd.avg or 0
-                    local dynamicThreshold = playerAvg >= 25
-                        and math.max(35, playerAvg * 1.4) or 90
-                    local effectiveThreshold = dist < 8 and dynamicThreshold or 85
-                    local approachThreshold = playerAvg >= 25 and playerAvg * 1.2 or 90
-                    local isApproaching = dd.prevDist and (dd.prevDist - dist) > 1.5
-                    local earlyTrigger = isApproaching and dist <= 20 and rawSpeed2 >= approachThreshold
-
-                    if (rawSpeed2 >= effectiveThreshold or earlyTrigger)
-                        and (now - (dd.lastFired or 0)) > 0.35 then
-                        dd.lastFired = now
-                        pressQ(pname)
-                    end
-                    dd.prevDist = dist
-                end
+        -- Ball possession check
+        local weBallX, weBallZ
+        local ballInst = getBall()
+        if ballInst then
+            local bbase = getMemBase(ballInst)
+            if bbase then
+                local bbx,_,bbz = readPosMem(bbase)
+                weBallX=bbx; weBallZ=bbz
             end
         end
-        task.wait(0.008)  -- 120hz — twice as fast as ESP loop
+
+        -- Our position + velocity
+        local myHRPCheck = getHRP()
+        local myPX, myPZ
+        if myHRPCheck then
+            local ppx,_,ppz = readPosInst(myHRPCheck)
+            myPX=ppx; myPZ=ppz
+        end
+        local weHaveBallNow = weBallX and myPX and math.sqrt((weBallX-myPX)^2+(weBallZ-myPZ)^2) < 6
+
+        -- Our own velocity (needed for relative speed)
+        local myVX, myVZ = 0, 0
+        if myPX and lastMyX then
+            local dtm = math.max(now - (lastMyTime or now), 0.001)
+            myVX = (myPX - lastMyX) / dtm
+            myVZ = (myPZ - lastMyZ) / dtm
+        end
+        lastMyX, lastMyZ, lastMyTime = myPX, myPZ, now
+
+        for _, player in ipairs(players:GetPlayers()) do
+            if player.Name == lp.Name then continue end
+            if not isEnemy(player) then continue end
+            local char = player.Character
+            local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+            if not hrp then continue end
+            local x,y,z = readPosInst(hrp)
+            if not x then continue end
+
+            local pname = player.Name
+            if not dribData[pname] then
+                dribData[pname] = {avg=0, lastFired=0, lastX=x, lastZ=z, lastTime=now}
+            end
+            local dd = dribData[pname]
+
+            local dt2 = math.max(now - (dd.lastTime or now), 0.001)
+
+            -- Enemy absolute velocity
+            local evx = dd.lastX and (x - dd.lastX) / dt2 or 0
+            local evz = dd.lastZ and (z - dd.lastZ) / dt2 or 0
+            dd.lastX=x; dd.lastZ=z; dd.lastTime=now
+
+            -- Update rolling avg of absolute speed (for reference)
+            local absSpeed = math.sqrt(evx*evx+evz*evz)
+            dd.avg = (dd.avg or 0) + (absSpeed - (dd.avg or 0)) * 0.12
+
+            -- Only check if dribble on and we exist
+            if not dribOn or not myPX then continue end
+
+            -- Relative velocity (enemy velocity minus ours)
+            local rvx = evx - myVX
+            local rvz = evz - myVZ
+            local relSpeed = math.sqrt(rvx*rvx + rvz*rvz)
+
+            -- Direction from enemy TO us
+            local dx = myPX - x
+            local dz = myPZ - z
+            local dist = math.sqrt(dx*dx + dz*dz)
+            if dist > dribR2 then continue end
+
+            local dirX = dx / math.max(dist, 0.001)
+            local dirZ = dz / math.max(dist, 0.001)
+
+            -- Dot product: are they moving toward us?
+            local approachDot = rvx * dirX + rvz * dirZ
+
+            -- Time to reach us at current relative speed
+            local timeToReach = dist / math.max(relSpeed, 0.001)
+
+            -- Angle check: must be somewhat directly approaching
+            local angleCheck = approachDot / math.max(relSpeed, 1)
+
+            local avg = dd.avg or 0
+            local relSpeedTrigger = math.max(18, avg * 1.4)
+
+            local isFastRelative = relSpeed > relSpeedTrigger
+            local isApproaching  = approachDot > 8
+            local willReachSoon  = timeToReach < 0.35
+            local angleOk        = angleCheck > 0.5  -- at least 60deg toward us
+
+            if isFastRelative and isApproaching and willReachSoon and angleOk
+                and (now - (dd.lastFired or 0)) > 0.25
+                and not weHaveBallNow then
+                dd.lastFired = now
+                pressQ(pname)
+            end
+        end
+        task.wait(0.008)
     end
 end)
 
 -- ============================================================
 -- Ring drawing helper
 -- ============================================================
-local function drawRing(lines, hrpPos, radius, groundOffset, skip)
-    local vp = camera.ViewportSize
+-- style: 0=solid, 1=dashed, 2=dotted, 3=animated rotating dotted
+local ringAnimOffset = 0
+local lastRingTick   = tick()
+
+local function drawRing(lines, hrpPos, radius, groundOffset, style, color, thick)
+    local vp  = camera.ViewportSize
+    local now = tick()
+
+    -- Advance animation offset
+    local dt = now - lastRingTick
+    lastRingTick = now
+    rainbowHue = (rainbowHue + dt * 0.15) % 1
+    if style == 3 then
+        ringAnimOffset = (ringAnimOffset + dt * 0.6) % 1
+    end
+
     local pts = {}
     for i = 1, FOV_SEGMENTS do
         local a = (i/FOV_SEGMENTS)*math.pi*2
@@ -647,13 +793,45 @@ local function drawRing(lines, hrpPos, radius, groundOffset, skip)
         local valid = (on==true) and sp~=nil and sp.X>-200 and sp.X<vp.X+200 and sp.Y>-200 and sp.Y<vp.Y+200
         pts[i] = {sp=(sp or Vector2.new(0,0)), valid=valid}
     end
+
     for i = 1, FOV_SEGMENTS do
         local line = lines[i]
-        if skip and (i%2==0) then line.Visible=false; continue end
+        local hide = false
+        if style == 1 then
+            -- Dashed: alternating equal segments
+            hide = (i%4 < 2)
+        elseif style == 2 then
+            -- Dotted: 1 segment visible, 4 hidden = tight dots like the image
+            hide = (i%2 ~= 0)
+        elseif style == 3 then
+            -- Dotted Animated: continuous smooth rotation using fractional phase
+            local phase = ((i / FOV_SEGMENTS) + ringAnimOffset) % 1
+            -- Sine wave: smooth on/off instead of hard cut
+            hide = (math.sin(phase * math.pi * FOV_SEGMENTS / 2) < 0)
+        end
+        if hide then line.Visible=false; continue end
+
         local a = pts[i]; local b = pts[(i%FOV_SEGMENTS)+1]
         if a.valid and b.valid then
             local sl = math.sqrt((a.sp.X-b.sp.X)^2+(a.sp.Y-b.sp.Y)^2)
-            if sl < 400 then line.From=a.sp; line.To=b.sp; line.Visible=true else line.Visible=false end
+            if sl < 400 then
+                -- Dotted styles: draw tiny segment (3px) at pt[i] toward pt[i+1]
+                local isDot = (style == 2 or style == 3)
+                local toX, toY
+                if isDot then
+                    local dx = b.sp.X - a.sp.X
+                    local dy = b.sp.Y - a.sp.Y
+                    local len = math.max(0.001, math.sqrt(dx*dx+dy*dy))
+                    toX = a.sp.X + (dx/len)*3
+                    toY = a.sp.Y + (dy/len)*3
+                else
+                    toX = b.sp.X; toY = b.sp.Y
+                end
+                line.From=a.sp; line.To=Vector2.new(toX,toY)
+                if color then line.Color=color end
+                if thick then line.Thickness=thick end
+                line.Visible=true
+            else line.Visible=false end
         else line.Visible=false end
     end
 end
@@ -664,18 +842,48 @@ end
 local function updateFOV()
     local hrp = getHRP()
 
-    if not get("auto_block") or not hrp then
-        hideFOV(); prevBallY=nil
+    local showCircles = get("show_circles")
+    if not get("auto_block") or not hrp or not showCircles then
+        hideFOV(); fovCircle.Visible=false; prevBallY=nil
     else
         local fovR = get("fov_radius") or FOV_WORLD_RADIUS
-        drawRing(fovLines, hrp.Position, fovR, -3, false)
+        local fovStyle = get("fov_style") or 0
+        local fovCol   = get("rainbow") and rainbowColor(0) or getColor("fov_color")
+        local fovThick = get("fov_thick") or 2
+        if fovStyle == 4 then
+            -- Native circle: project center+edge to get screen radius
+            local sp0, on0 = WorldToScreen(Vector3.new(hrp.Position.X, hrp.Position.Y-3, hrp.Position.Z))
+            local spE, onE = WorldToScreen(Vector3.new(hrp.Position.X+fovR, hrp.Position.Y-3, hrp.Position.Z))
+            for _,l in ipairs(fovLines) do l.Visible=false end
+            if on0 and onE then
+                fovCircle.Position=sp0; fovCircle.Radius=math.abs(spE.X-sp0.X)
+                fovCircle.Color=fovCol; fovCircle.Thickness=fovThick; fovCircle.Visible=true
+            else fovCircle.Visible=false end
+        else
+            fovCircle.Visible=false
+            drawRing(fovLines, hrp.Position, fovR, -3, fovStyle, fovCol, fovThick)
+        end
     end
 
-    if not get("auto_dribble") or not hrp then
-        hideDribFOV()
+    if not get("auto_dribble") or not hrp or not showCircles then
+        hideDribFOV(); dribCircle.Visible=false
     else
-        local dribR = get("dribble_fov") or 30
-        drawRing(dribLines, hrp.Position, dribR, -3, true)
+        local dribR     = get("dribble_fov") or 30
+        local dribStyle = get("drib_style") or 1
+        local dribCol   = get("rainbow") and rainbowColor(0.33) or getColor("drib_color")
+        local dribThick = get("drib_thick") or 1
+        if dribStyle == 4 then
+            local sp0, on0 = WorldToScreen(Vector3.new(hrp.Position.X, hrp.Position.Y-3, hrp.Position.Z))
+            local spE, onE = WorldToScreen(Vector3.new(hrp.Position.X+dribR, hrp.Position.Y-3, hrp.Position.Z))
+            for _,l in ipairs(dribLines) do l.Visible=false end
+            if on0 and onE then
+                dribCircle.Position=sp0; dribCircle.Radius=math.abs(spE.X-sp0.X)
+                dribCircle.Color=dribCol; dribCircle.Thickness=dribThick; dribCircle.Visible=true
+            else dribCircle.Visible=false end
+        else
+            dribCircle.Visible=false
+            drawRing(dribLines, hrp.Position, dribR, -3, dribStyle, dribCol, dribThick)
+        end
     end
 
     if not get("auto_block") or not hrp then return end
@@ -706,22 +914,28 @@ local function updateFOV()
         end
     end
 
+    -- Don't block if WE are currently shooting
+    local weAreShooting = m1HoldStart ~= nil and (tick()-m1HoldStart) >= M1_HOLD_MIN
+
     local velY = 0; pcall(function() velY = ball.AssemblyLinearVelocity.Y end)
     local ballRising = velY >= VEL_Y_THRESHOLD
                     or (prevBallY ~= nil and ballPos.Y - prevBallY >= POS_DELTA_Y)
-    local ballAboveFloor = ballPos.Y > 4.0
+    local ballAboveFloor = ballPos.Y > 2.5
 
-    if inFOV and shouldBlock then
-        if ballRising and ballAboveFloor then
+    -- Require ball to be above minimum height AND moving upward
+    -- Extra bounce check: ball must have been below this height recently
+    local isBounce = prevBallY ~= nil and prevBallY < 3.5 and ballPos.Y < 5.0
+
+    if inFOV and shouldBlock and not weAreShooting then
+        if ballRising and ballAboveFloor and not isBounce then
             stealWarn.Text="AUTO BLOCK!"
             stealWarn.Position=Vector2.new(vp.X/2,vp.Y/2-80)
             stealWarn.Visible=true; setFOVColor(255,60,60); doBlock()
         else
-            stealWarn.Visible=false; setFOVColor(0,255,0)
+            stealWarn.Visible=false
         end
     else
         stealWarn.Visible=false
-        if inFOV then setFOVColor(255,200,0) else setFOVColor(0,255,0) end
     end
     prevBallY = ballPos.Y
 end
@@ -742,5 +956,7 @@ end
 running=false
 for _,l in ipairs(fovLines)  do pcall(function() l:Remove() end) end
 for _,l in ipairs(dribLines) do pcall(function() l:Remove() end) end
+pcall(function() fovCircle:Remove() end)
+pcall(function() dribCircle:Remove() end)
 pcall(function() stealWarn:Remove() end)
 UI.RemoveTab("Auto Hoop")
