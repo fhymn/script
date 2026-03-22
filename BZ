@@ -303,7 +303,7 @@ UI.AddTab("Auto Hoop", function(tab)
     -- ── Main: core features ──────────────────────────────────
     local main = tab:Section("Main", "Left")
     w.auto_goal    = main:Toggle("auto_goal",    "Auto Goal",    false)
-    main:Tip("Auto Goal")
+    main:Tip("automatically glide ball to hoop")
     main:Spacing()
     w.auto_block   = main:Toggle("auto_block",   "Auto Block",   false)
     w.block_tc     = main:Toggle("block_tc",     "Team Check",   false)
@@ -311,7 +311,7 @@ UI.AddTab("Auto Hoop", function(tab)
     w.fov_radius   = main:SliderInt("fov_radius","Block Radius", 5, 60, 15)
     main:Spacing()
     w.auto_dribble = main:Toggle("auto_dribble", "Auto Dribble", false)
-    main:Tip("Auto Dribble when someone tries to steal")
+    main:Tip("automatically dribble when they try to steal.")
     w.dribble_fov  = main:SliderInt("dribble_fov","Dribble Radius", 5, 50, 30)
 
     -- ── Misc: queue ──────────────────────────────────────────
