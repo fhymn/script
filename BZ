@@ -8,7 +8,7 @@ local camera  = ws.CurrentCamera
 -- ============================================================
 -- Constants
 -- ============================================================
-local POLL            = 0.03
+local POLL            = 0.1
 local TRIGGER_DELTA   = 2
 local LAUNCH_DELAY    = 0.3
 local MAX_TRAVEL_TIME = 1.8
@@ -26,6 +26,11 @@ local M1_HOLD_MIN     = 0.7
 local AUTO_Q_KEY      = 0x51
 local AUTO_Q_COOLDOWN = 0.8  -- global debounce
 local running         = true
+
+local function get(id)
+    local ok, v = pcall(function() return UI.GetValue(id) end)
+    return ok and v or false
+end
 
 -- ============================================================
 -- Memory helpers
@@ -54,7 +59,13 @@ local function readPosInst(inst)
     if pok then return pos.X,pos.Y,pos.Z end
     return nil
 end
-local function easeInOut(t) return t*t*(3-2*t) end
+
+-- Smooth easing that keeps consistent travel speed (no ease-in-out slow spots)
+-- Uses a slight ease-out so it arrives cleanly without feeling abrupt
+local function easeOutSmooth(t)
+    -- Linear with a gentle ease-out at the end only
+    return t < 0.85 and (t / 0.85) * 0.85 or 0.85 + (t - 0.85) / (1 - 0.85) * 0.15
+end
 
 -- ============================================================
 -- Helpers
@@ -95,14 +106,15 @@ local function updateTarget()
     local tn=lp.Team and lp.Team.Name or ""
     if tn==lastTeamName then return end
     local side
-    if string.lower(tn)=="home" then side="Away"
-    elseif string.lower(tn)=="away" or string.lower(tn)=="visitor" then side="Home"
+    -- Shoot at YOUR OWN team's hoop (corrected)
+    if string.lower(tn)=="home" then side="Home"
+    elseif string.lower(tn)=="away" or string.lower(tn)=="visitor" then side="Away"
     end
     if side then
         local h = getHoopPos(side)
         if h then
             TARGET=h; lastTeamName=tn
-            print(string.format("[AutoGoal] Team '%s' -> %s hoop (%.2f,%.2f,%.2f)", tn, side, h.x, h.y, h.z))
+            
         end
     end
 end
@@ -227,32 +239,54 @@ end
 -- Auto goal
 -- ============================================================
 local lastScoreTime=0
+
 local function doArc(ball)
     if not TARGET then return end
     local tx,ty,tz=TARGET.x,TARGET.y,TARGET.z
     local collider=ball:FindFirstChild("Collider")
     local cb=getMemBase(ball); local cc=collider and getMemBase(collider)
     if not cb then return end
-    wait(LAUNCH_DELAY); if not running then return end
+    wait(get("launch_delay") or LAUNCH_DELAY); if not running then return end
     cb=getMemBase(ball); cc=collider and getMemBase(collider)
     if not cb then return end
     local sx,sy,sz=readPosMem(cb)
     if sy<MIN_SHOT_HEIGHT then return end
     local dist=math.sqrt((tx-sx)^2+(tz-sz)^2)
     if dist<5 then return end
-    local travelTime=math.min(MAX_TRAVEL_TIME,math.max(0.9,dist*0.02))
-    local arcHeight=math.max(5,dist*0.15)
-    local startTime=tick()
+
+    -- Travel time scales with distance to keep speed consistent
+    -- Base speed ~55 units/sec, clamped so short shots aren't too slow
+    local BASE_SPEED = get("shot_speed") or 68
+    local travelTime = math.min(MAX_TRAVEL_TIME, math.max(0.35, dist / BASE_SPEED))
+
+    -- Arc height proportional to distance for a natural parabola
+    local arcMult = get("arc_height") or 0.23
+    local arcHeight = math.max(4, dist * arcMult)
+
+    local startTime = tick()
     while running do
-        local t=(tick()-startTime)/travelTime
-        if t>=1 then
-            pcall(function() writePosBase(cb,tx,ty,tz); if cc then writePosBase(cc,tx,ty,tz) end end)
-            lastScoreTime=tick(); break
+        local elapsed = tick() - startTime
+        local t = elapsed / travelTime
+
+        if t >= 1 then
+            pcall(function()
+                writePosBase(cb, tx, ty, tz)
+                if cc then writePosBase(cc, tx, ty, tz) end
+            end)
+            lastScoreTime = tick()
+            break
         end
-        local et=easeInOut(t)
-        local ix=sx+(tx-sx)*et; local iz=sz+(tz-sz)*et
-        local iy=sy+(ty-sy)*et+arcHeight*math.sin(t*math.pi)
-        pcall(function() writePosBase(cb,ix,iy,iz); if cc then writePosBase(cc,ix,iy,iz) end end)
+
+        -- Use linear interpolation for XZ (constant speed horizontally)
+        -- Arc only affects Y axis with a sin curve
+        local ix = sx + (tx - sx) * t
+        local iz = sz + (tz - sz) * t
+        local iy = sy + (ty - sy) * t + arcHeight * math.sin(t * math.pi)
+
+        pcall(function()
+            writePosBase(cb, ix, iy, iz)
+            if cc then writePosBase(cc, ix, iy, iz) end
+        end)
         task.wait()
     end
 end
@@ -278,7 +312,7 @@ task.spawn(function()
                     local delta=math.sqrt((bx-lastBX)^2+(bz-lastBZ)^2)
                     local holdDur=m1HoldStart and (tick()-m1HoldStart) or 0
                     if not inFlight and delta>TRIGGER_DELTA and by>MIN_SHOT_HEIGHT
-                        and (tick()-lastScoreTime)>SCORE_COOLDOWN and holdDur>=M1_HOLD_MIN then
+                        and (tick()-lastScoreTime)>(get("score_cd") or SCORE_COOLDOWN) and holdDur>=(get("m1_hold_min") or M1_HOLD_MIN) then
                         local d=TARGET and math.sqrt((TARGET.x-bx)^2+(TARGET.y-by)^2+(TARGET.z-bz)^2) or 0
                         if d>5 then
                             inFlight=true
@@ -300,7 +334,7 @@ local w={}
 
 UI.AddTab("Auto Hoop", function(tab)
 
-    -- ── Main: core features ──────────────────────────────────
+
     local main = tab:Section("Main", "Left")
     w.auto_goal    = main:Toggle("auto_goal",    "Auto Goal",    false)
     main:Tip("automatically glide ball to hoop")
@@ -314,12 +348,20 @@ UI.AddTab("Auto Hoop", function(tab)
     main:Tip("automatically dribble when they try to steal.")
     w.dribble_fov  = main:SliderInt("dribble_fov","Dribble Radius", 5, 50, 30)
 
-    -- ── Misc: queue ──────────────────────────────────────────
+
+    -- Shot Settings
+    local shot = tab:Section("Auto Goal Settings", "Left")
+    w.shot_speed   = shot:SliderInt("shot_speed",    "Shot Speed",       30,  150,   79)
+    w.arc_height   = shot:SliderFloat("arc_height",  "Arc Height",     0.01, 0.40, 0.23)
+    w.launch_delay = shot:SliderFloat("launch_delay","Launch Delay",    0.0,  1.0,  0.30)
+    w.m1_hold_min  = shot:SliderFloat("m1_hold_min", "Hold Threshold",  0.1,  2.0,  0.7)
+    w.score_cd     = shot:SliderFloat("score_cd",    "Score Cooldown",  0.5,  5.0,  2.0)
+
     local misc = tab:Section("Misc", "Left")
     w.position = misc:Combo("position","Position",POSITIONS,0,function(_,text) selectedPos=text end)
     misc:Button("Queue (F2)", function() doQueue() end)
 
-    -- ── Visuals: ESP ─────────────────────────────────────────
+
     local vis = tab:Section("Visuals", "Right")
     w.ball_esp    = vis:Toggle("ball_esp",   "Ball ESP",     false)
     w.ball_col    = vis:ColorPicker("ball_col", 1,0.65,0,1)
@@ -340,7 +382,7 @@ UI.AddTab("Auto Hoop", function(tab)
     w.rainbow     = vis:Toggle("rainbow","Rainbow Mode", false)
     vis:Tip("Cycles hue across rings, ESP text and tracers")
 
-    -- ── Visuals: FOV rings ────────────────────────────────────
+
     local fovvis = tab:Section("FOV Style", "Right")
     w.show_circles  = fovvis:Toggle("show_circles", "Show FOV Circles", true)
     fovvis:Spacing()
@@ -376,11 +418,12 @@ UI.SetValue("plr_tracer",   false)
 UI.SetValue("plr_name",     false)
 UI.SetValue("plr_speed",    false)
 UI.SetValue("plr_tc",       false)
+UI.SetValue("shot_speed",   79)
+UI.SetValue("arc_height",   0.23)
+UI.SetValue("launch_delay", 0.30)
+UI.SetValue("m1_hold_min",  0.7)
+UI.SetValue("score_cd",     2.0)
 
-local function get(id)
-    local ok, v = pcall(function() return UI.GetValue(id) end)
-    return ok and v or false
-end
 local FONTS = {
     [0] = Drawing.Fonts.UI,
     [1] = Drawing.Fonts.System,
@@ -586,7 +629,7 @@ task.spawn(function()
                 end
             end
 
-            -- ── ESP rendering ───────────────────────────────
+
             if not plrOn then hideSlot(slot); continue end
             if teamChk and not isEnemy(player) then hideSlot(slot); continue end
 
