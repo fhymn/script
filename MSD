@@ -1,0 +1,415 @@
+-- ============================================================ --
+--  Minesweeper ESP  |  Matcha Edition  (v17)
+-- ============================================================ --
+
+if _G.MS_CLEANUP then _G.MS_CLEANUP() end
+task.wait(0.1)
+
+_G.MS_RUN     = false
+_G.MS_ENABLED = false
+
+-- ==================== CONFIG ==================== --
+local COLOR_MINE    = Color3.fromRGB(255, 60, 60)
+local TOGGLE_KEY    = "F"
+local RING_RADIUS   = 15
+local RING_SIDES    = 8
+local RING_THICK    = 2
+local MAX_DIST      = 150
+local SCAN_INTERVAL = 5
+
+-- ==================== SETUP ===================== --
+local ws         = game:GetService("Workspace")
+local UIS        = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Players    = game:GetService("Players")
+local Objects    = ws:FindFirstChild("Objects")
+if not Objects then return end
+
+local function getPlayerPos()
+    local lp = Players.LocalPlayer
+    if not lp then return nil end
+    local char = lp.Character
+    if not char then return nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    local ok, pos = pcall(function() return hrp.Position end)
+    if ok then return pos end
+end
+
+local function w2s(pos)
+    local ok, v, onScreen = pcall(WorldToScreen, pos)
+    if ok and onScreen then return v end
+end
+
+-- ==================== STATE ===================== --
+local tiles    = {}
+local tracked  = {}
+local markers  = {}
+local visible  = {}
+local conns    = {}
+local bidMap   = {}
+local dirty    = {}
+local solving  = false
+local scanned  = {}   -- folder -> true (currently tracked)
+local finished = {}   -- folder -> true (board is done, never re-scan)
+local mineList = {}
+
+-- ==================== FULL RESET ================ --
+local function full_reset()
+    for _, m in pairs(markers) do
+        pcall(function() m.Visible = false; m:Remove() end)
+    end
+    for _, tc in pairs(conns) do
+        for _, c in ipairs(tc) do pcall(function() c:Disconnect() end) end
+    end
+    markers  = {}; visible  = {}; tracked  = {}
+    tiles    = {}; conns    = {}
+    dirty    = {}; scanned  = {}; bidMap   = {}
+    mineList = {}; solving  = false
+    -- NOTE: do NOT clear finished — we want to remember done boards
+    -- across toggles so we never re-stack them
+end
+
+_G.MS_CLEANUP = function()
+    _G.MS_RUN     = false
+    _G.MS_ENABLED = false
+    full_reset()
+    finished = {}
+    _G.MS_CLEANUP = nil
+end
+
+-- ==================== MARKERS =================== --
+local function remove_marker(part)
+    local m = markers[part]
+    if m then
+        m.Visible = false
+        pcall(function() m:Remove() end)
+        markers[part] = nil
+    end
+    visible[part] = nil
+end
+
+local function show_mine_ring(part)
+    local t = tracked[part]
+    if not part or not part.Parent then return end
+    if t and t.activated then remove_marker(part); return end
+    local m = markers[part]
+    if not m then
+        m = Drawing.new("Circle")
+        m.Radius    = RING_RADIUS
+        m.NumSides  = RING_SIDES
+        m.Thickness = RING_THICK
+        m.Filled    = false
+        m.Visible   = false
+        m.Color     = COLOR_MINE
+        markers[part] = m
+    end
+    local ok, pos = pcall(function() return part.Position end)
+    if not ok or not pos then return end
+    local s = w2s(pos)
+    if s then
+        m.Position = s; m.Visible = true; visible[part] = true
+    else
+        m.Visible = false; visible[part] = nil
+    end
+end
+
+-- ==================== HELPERS =================== --
+local function get_bid(folder)
+    if not bidMap[folder] then bidMap[folder] = tostring(folder) end
+    return bidMap[folder]
+end
+
+local function board_center(folder)
+    local ok, children = pcall(function() return folder:GetChildren() end)
+    if not ok or #children == 0 then return nil end
+    local ok2, pos = pcall(function() return children[1].Position end)
+    if ok2 and pos then return pos end
+end
+
+-- Check if every tile in a folder is activated (board is done)
+local function board_is_finished(folder)
+    local ok, children = pcall(function() return folder:GetChildren() end)
+    if not ok or #children == 0 then return false end
+    for _, part in ipairs(children) do
+        local _, activated = pcall(function() return part:GetAttribute("Activated") end)
+        -- If any tile is not activated, board is still in progress
+        if activated ~= true then return false end
+    end
+    return true
+end
+
+-- ==================== PURGE BID ================= --
+local function purge_bid(bid)
+    for i = #tiles, 1, -1 do
+        local t = tiles[i]
+        if t.bid == bid then
+            local tc = conns[t.part]
+            if tc then
+                for _, c in ipairs(tc) do pcall(function() c:Disconnect() end) end
+                conns[t.part] = nil
+            end
+            remove_marker(t.part)
+            tracked[t.part] = nil
+            table.remove(tiles, i)
+        end
+    end
+    dirty[bid] = nil
+    local newList = {}
+    for _, t in ipairs(mineList) do
+        if t.bid ~= bid then newList[#newList+1] = t end
+    end
+    mineList = newList
+end
+
+-- ==================== DRAW ====================== --
+local function flush_dirty()
+    if solving or not next(dirty) then return end
+    solving = true
+    dirty = {}
+    mineList = {}
+    for _, t in ipairs(tiles) do
+        if t.isMine and not t.activated then
+            mineList[#mineList+1] = t
+        end
+    end
+    for _, t in ipairs(mineList) do
+        show_mine_ring(t.part)
+    end
+    solving = false
+end
+
+local function queue_redraw(bid)
+    dirty[bid] = true
+    if solving then return end
+    task.spawn(function()
+        task.wait(0.05)
+        flush_dirty()
+    end)
+end
+
+-- ==================== TILE EVENTS =============== --
+local function on_changed(t)
+    if not _G.MS_ENABLED then return end
+    if not t.part or not t.part.Parent then return end
+    local _, isMine    = pcall(function() return t.part:GetAttribute("Bomb") end)
+    local _, activated = pcall(function() return t.part:GetAttribute("Activated") end)
+    local newMine = (isMine == true)
+    local newAct  = (activated == true)
+    if newMine == t.isMine and newAct == t.activated then return end
+    t.isMine = newMine; t.activated = newAct
+    if t.activated then
+        remove_marker(t.part)
+        for i = #mineList, 1, -1 do
+            if mineList[i] == t then table.remove(mineList, i); break end
+        end
+    end
+    queue_redraw(t.bid)
+end
+
+-- ==================== TRACK TILE ================ --
+local function track_tile(folder, part)
+    if tracked[part] then return end
+    if not part or not part.Parent then return end
+    local r, c = part.Name:match("^(-?%d+):(-?%d+)$")
+    if not r then return end
+    local _, isTile    = pcall(function() return part:GetAttribute("Tile") end)
+    local _, isMine    = pcall(function() return part:GetAttribute("Bomb") end)
+    local _, activated = pcall(function() return part:GetAttribute("Activated") end)
+    if not isTile then return end
+    -- Skip already-activated tiles entirely — no marker, no connection needed
+    -- (activated tiles can never become unactivated)
+    if activated == true then return end
+    local bid = get_bid(folder)
+    local t = {
+        part      = part,
+        row       = tonumber(r), col = tonumber(c),
+        bid       = bid,
+        isMine    = (isMine == true),
+        activated = false,
+    }
+    tiles[#tiles+1] = t
+    tracked[part]   = t
+    local tc = {}
+    for _, attr in ipairs({"Bomb", "Activated"}) do
+        local ok, conn = pcall(function()
+            return part:GetAttributeChangedSignal(attr):Connect(function()
+                on_changed(t)
+            end)
+        end)
+        if ok and conn then tc[#tc+1] = conn end
+    end
+    conns[part] = tc
+    dirty[bid]  = true
+end
+
+-- ==================== SCAN ====================== --
+local function scan_folder(sf, side)
+    local bid = get_bid(sf)
+
+    -- Already finished — never touch again
+    if finished[sf] then return end
+
+    local ok, children = pcall(function() return sf:GetChildren() end)
+    if not ok then return end
+
+    if scanned[sf] then
+        -- Check if board just became empty (round ended cleanly)
+        if #children == 0 then
+            scanned[sf] = nil
+            purge_bid(bid)
+            return
+        end
+        -- Check if board is now fully finished (all activated)
+        -- If so, purge all drawings and mark as finished so we never re-draw
+        if board_is_finished(sf) then
+            purge_bid(bid)
+            scanned[sf]  = nil
+            finished[sf] = true
+            return
+        end
+    else
+        if #children == 0 then return end
+        -- Distance gate
+        local ppos  = getPlayerPos()
+        local center = board_center(sf)
+        if ppos and center then
+            if (center - ppos).Magnitude > MAX_DIST then return end
+        end
+        -- Skip if already finished before we even tracked it
+        if board_is_finished(sf) then
+            finished[sf] = true
+            return
+        end
+        scanned[sf] = true
+        for _, p in ipairs(children) do track_tile(sf, p) end
+    end
+end
+
+local function scan()
+    local pb = Objects:FindFirstChild("PracticeBoards")
+    if pb then
+        for _, f in ipairs(pb:GetChildren()) do
+            if not finished[f] then
+                local ok, children = pcall(function() return f:GetChildren() end)
+                if ok and #children > 5 then
+                    if not scanned[f] then
+                        local ppos   = getPlayerPos()
+                        local center = board_center(f)
+                        if ppos and center and (center - ppos).Magnitude > MAX_DIST then
+                            -- too far
+                        elseif not board_is_finished(f) then
+                            scanned[f] = true
+                            for _, p in ipairs(children) do track_tile(f, p) end
+                        else
+                            finished[f] = true
+                        end
+                    else
+                        if board_is_finished(f) then
+                            purge_bid(get_bid(f))
+                            scanned[f]  = nil
+                            finished[f] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local arenas = Objects:FindFirstChild("Arenas")
+    if not arenas then return end
+    for _, arena in ipairs(arenas:GetChildren()) do
+        local boards = arena:FindFirstChild("Boards")
+        if not boards then continue end
+        for _, side in ipairs({"Left","Right"}) do
+            local sf = boards:FindFirstChild(side)
+            if sf then scan_folder(sf, side) end
+        end
+    end
+end
+
+-- ==================== CONNECTIONS =============== --
+local renderConn
+local heartbeatConn
+local toggleConn
+local lastScan    = 0
+local lastCleanup = 0
+
+local function start()
+    full_reset()
+    -- finished persists across toggles intentionally
+    scan()
+    flush_dirty()
+
+    renderConn = RunService.RenderStepped:Connect(function()
+        if not _G.MS_ENABLED then return end
+        for part in pairs(visible) do
+            local t = tracked[part]
+            if t and t.activated then
+                remove_marker(part)
+            else
+                local m = markers[part]
+                if m and part and part.Parent then
+                    local ok, pos = pcall(function() return part.Position end)
+                    if ok and pos then
+                        local s = w2s(pos)
+                        if s then
+                            m.Position = s; m.Visible = true
+                        else
+                            m.Visible = false; visible[part] = nil
+                        end
+                    end
+                else
+                    if m then m.Visible = false end
+                    visible[part] = nil
+                end
+            end
+        end
+    end)
+
+    heartbeatConn = RunService.Heartbeat:Connect(function()
+        if not _G.MS_ENABLED then return end
+        local now = os.clock()
+        if now - lastScan > SCAN_INTERVAL then
+            lastScan = now
+            scan()
+            if next(dirty) then flush_dirty() end
+        end
+        if now - lastCleanup > 15 then
+            lastCleanup = now
+            for part in pairs(visible) do
+                if not part or not part.Parent then remove_marker(part) end
+            end
+        end
+    end)
+end
+
+local function stop()
+    if renderConn    then renderConn:Disconnect();    renderConn    = nil end
+    if heartbeatConn then heartbeatConn:Disconnect(); heartbeatConn = nil end
+    full_reset()
+end
+
+toggleConn = UIS.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode ~= Enum.KeyCode[TOGGLE_KEY] then return end
+    if _G.MS_ENABLED then
+        _G.MS_ENABLED = false
+        stop()
+        print("[MS ESP] OFF")
+    else
+        _G.MS_ENABLED = true
+        lastScan = 0; lastCleanup = 0
+        start()
+        print("[MS ESP] ON — mines tracked: " .. #mineList)
+    end
+end)
+
+-- ==================== KEEPALIVE ================= --
+_G.MS_RUN = true
+while _G.MS_RUN do task.wait(1) end
+
+-- ==================== FINAL CLEANUP ============= --
+stop()
+if toggleConn then pcall(function() toggleConn:Disconnect() end) end
+_G.MS_CLEANUP()
